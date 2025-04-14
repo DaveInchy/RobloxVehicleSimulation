@@ -5,42 +5,82 @@ local LastStuff = {
 	RR = {},
 }
 
-local VisualiseRaycast = true
 local carProps = require(game.ReplicatedStorage:WaitForChild("VehiclePropertiesList"))
+local VehiclePhysics = require(game.ReplicatedStorage:WaitForChild("VehiclePhysics"))
+local useState = require(game.ReplicatedStorage:WaitForChild("useState")) -- Require your module
+
 local VehicleFolder = workspace.Vehicles
 local AllCarsMemory = {}
-local ExistingCarsTable = {}--it stores every car
+local ExistingCarsTable = {}
+local PhysicsStates = {} -- Store physics state for each vehicle
+local VehicleInputStates = {} -- Store useState objects for each vehicle
 
-local function AddCar(obj,cprops)
+local function AddCar(obj, _cprops) -- Mark cprops as unused
+	table.insert(ExistingCarsTable,obj)
+	obj.PrimaryPart:SetNetworkOwner(nil)
+	AllCarsMemory[obj] = {}
+	AllCarsMemory[obj].SpringLengthMemory = {}
+	PhysicsStates[obj] = VehiclePhysics.createPhysicsState() -- Initialize physics state
 
-	table.insert(ExistingCarsTable,obj)--adds car to table
-	obj.PrimaryPart:SetNetworkOwner(nil)--now car physics are calculated only on server
-	AllCarsMemory[obj] = {}--adds table for any memory you want, but i need it only for suspension right now
-	AllCarsMemory[obj].SpringLengthMemory = {}--adds table for springs length memory, values added below
-	for i,v in pairs(carProps.getWheelPositions(obj))do AllCarsMemory[obj].SpringLengthMemory[i] = 1.2 end--sets spring lenth
-	obj:FindFirstChildOfClass('VehicleSeat'):GetPropertyChangedSignal('Occupant'):Connect(function()--event if seat's occupant value changed
-		local occ = obj:FindFirstChildOfClass('VehicleSeat').Occupant
-		if occ then--if someone just sat
+	-- Initialize input states using useState, parented to the car model
+	VehicleInputStates[obj] = {
+		Throttle = useState(0, "ThrottleInput", obj), -- Initial value 0
+		Steer = useState(0, "SteerInput", obj),    -- Initial value 0
+		Braking = useState(false, "BrakingInput", obj) -- Initial value false
+	}
+
+	for wheelName, _ in pairs(carProps.getWheelPositions(obj)) do -- Mark v as unused
+		AllCarsMemory[obj].SpringLengthMemory[wheelName] = 1.2 -- Use wheelName as key
+	end
+	-- Handle seat occupant changes
+	obj:FindFirstChildOfClass('VehicleSeat'):GetPropertyChangedSignal('Occupant'):Connect(function()
+		local seatPart = obj:FindFirstChildOfClass('VehicleSeat')
+		local occ = seatPart.Occupant
+		local carPrim = obj.PrimaryPart
+
+		if occ then
 			local player = game.Players:GetPlayerFromCharacter(occ.Parent)
-			if player then--if not npc
-				obj.PrimaryPart:SetNetworkOwner(player)--now player can do car's physics on their own
+			if player then
+				-- Ensure unanchored before setting owner (server-side)
+				if carPrim and carPrim.Anchored then
+					carPrim.Anchored = false
+				end
+				if carPrim then
+					carPrim:SetNetworkOwner(player)
+				end
 			end
 		else
-			obj.PrimaryPart:SetNetworkOwner(nil)--player exited, physics go back to server
+			 -- Set owner to server *after* ensuring unanchored
+			if carPrim then
+				carPrim.Anchored = false -- Ensure unanchored first
+				task.wait() -- Allow physics engine a moment to update
+				carPrim:SetNetworkOwner(nil)
+				carPrim.Anchored = true
+				task.wait(0.1) -- Brief anchor duration
+				carPrim.Anchored = false
+			end
 		end
 	end)
 
 	for i,v in pairs(obj:GetChildren())do
 		if v:IsA("Seat")then
 			v:GetPropertyChangedSignal('Occupant'):Connect(function()--event if seat's occupant value changed
+				local carPrim = obj.PrimaryPart -- Get PrimaryPart again for this scope
 				if v.Occupant then
 					local player = game.Players:GetPlayerFromCharacter(v.Occupant.Parent)
 					if player then--if not npc
-						wait()
+						-- Ensure unanchored before setting owner (server-side for other seats)
+						if carPrim and carPrim.Anchored then
+							carPrim.Anchored = false
+						end
+						-- Don't change owner if it's already the player in the driver seat
+						--[[ wait()
 						if obj.PrimaryPart:GetNetworkOwner()==player then
 							obj.PrimaryPart:SetNetworkOwner(nil)
-						end
+						end ]]-- Logic seems redundant/potentially problematic, commented out
 					end
+				else -- Occupant left a non-driver seat
+					-- No need to anchor/unanchor here, driver seat logic handles ownership
 				end
 			end)
 		end
@@ -63,12 +103,9 @@ local function AddCar(obj,cprops)
 		local weld = Instance.new("Weld",ClonedWheel)
 		weld.Part0 = obj.PrimaryPart
 		weld.Part1 = ClonedWheel.PrimaryPart
-		weld.C0 = CFrame.new(carProps.getWheelPositions(obj)[i]) * CFrame.Angles(0,math.rad(-180),0)
-
-		if v.x>0 then
-
-			weld.C0 = weld.C0 * CFrame.Angles(0,math.rad(180),0)
-
+		weld.C0 = CFrame.new(carProps.getWheelPositions(obj)[i])
+		if v.x > 0 then
+			weld.C0 = weld.C0 * CFrame.Angles(0, math.rad(180), 0)
 		end
 	end
 end
@@ -100,7 +137,7 @@ end
 
 
 
-for _, v in pairs(game.ReplicatedStorage.Vehicles:GetChildren()) do
+for _, v in pairs(game.ReplicatedFirst.Vehicles:GetChildren()) do
 	SpawnCar(v.Name)
 end
 
@@ -216,130 +253,80 @@ end)
 
 
 while true do
+    local delta = game["Run Service"].PreSimulation:Wait()
 
-	local delta = game["Run Service"].PreSimulation:Wait()
+    for _, carModel in pairs(ExistingCarsTable) do
+        local carPrim = carModel.PrimaryPart or carModel:FindFirstChild("Main Part")
+        if not carPrim then continue end
 
-	for _, carModel in pairs(ExistingCarsTable)do
+        -- Get network ownership status only if part is not anchored
+        local isNetworkOwned = false
+        if not carPrim.Anchored then
+            isNetworkOwned = carPrim:GetNetworkOwner() ~= nil
+        end
 
-		local carPrim = carModel.PrimaryPart
+        -- Only process physics if server owns the car
+        if not isNetworkOwned then
+            local id = carModel:GetAttribute("id")
+            local props = carProps[id]
+            local inputStates = VehicleInputStates[carModel]
 
-		if not (carModel.Parent == game.Workspace.Vehicles) or not (carModel.Parent == game.Workspace) then
-			continue;
-		else if not carPrim:GetNetworkOwner() then
+            -- Get current inputs from useState objects
+            local throttle = inputStates.Throttle:get() or 0
+            local steer = inputStates.Steer:get() or 0
+            local braking = inputStates.Braking:get() or false
 
-			--get the properties
-			local id = carModel:GetAttribute("id")
-			local owner = carModel:GetAttribute("owner")
-			local props = carProps[id]
+            -- Check if a player is in the seat
+            local seat = carModel:FindFirstChildOfClass('VehicleSeat')
+            local occupant = seat and seat.Occupant
+            local isPlayerInSeat = false
+            if occupant then
+                local player = game.Players:GetPlayerFromCharacter(occupant.Parent)
+                isPlayerInSeat = player ~= nil
+            end
+            local isBoosting = false
+            if not isPlayerInSeat then
+                -- If no player, never boost or brake
+                braking = false
+                isBoosting = false
+            end
 
-			local DisCarSpringLength = AllCarsMemory[carModel].SpringLengthMemory
-			local WheelPositions = carProps.getWheelPositions(carModel);
+            -- Update physics using shared module and state inputs
+            local wheelStates = VehiclePhysics.updateVehiclePhysics(
+                carModel,
+                PhysicsStates[carModel],
+                props,
+                delta,
+                throttle, -- Pass throttle from state
+                steer,    -- Pass steer from state
+                braking,   -- Pass braking from state
+                isBoosting, -- Pass boosting state
+                props.PhysicsConstraints -- Pass constraints from props
+            )
 
-			for wheelName, originalPosition in pairs(WheelPositions) do
+            -- Update visual wheel rotations
+            if wheelStates then
+                for wheelName, state in pairs(wheelStates) do
+                    local wheel = carModel.Wheels:FindFirstChild(wheelName)
+                    if wheel and wheel:FindFirstChild("Weld") then
+                        local weld = wheel.Weld
+                        local basePos = carProps.getWheelPositions(carModel)[wheelName]
 
-				local carCFrame = carPrim.CFrame
-				local rayOrigin = carCFrame:ToWorldSpace(CFrame.new(originalPosition)).p
-				local rayDirection = -carCFrame.UpVector * (props.SuspensionMaxLength + props.wheelRadius)
-				local rayParams = RaycastParams.new()
-				rayParams.FilterDescendantsInstances = {carModel}
-				local raycast = workspace:Raycast(rayOrigin,rayDirection,rayParams)
+                        local weldInitPos = CFrame.new(basePos - Vector3.new(0, state.springLength, 0))
+                        if string.sub(wheelName,1,1)=='F' then
+                            weldInitPos = weldInitPos * CFrame.Angles(0,-math.rad(PhysicsStates[carModel].steeringAngle),0)
+                        end
 
-				if raycast then
-
-					local RaycastDistance = (rayOrigin - raycast.Position).magnitude
-
-					local SpringLength = math.clamp(RaycastDistance - props.wheelRadius, 0, props.SuspensionMaxLength)
-					local StiffnessForce = props.Stiffness * (props.SuspensionMaxLength - SpringLength)
-					local DamperForce = props.Damper * (( DisCarSpringLength[wheelName] - SpringLength) / delta)
-					local SuspensionForceVec3 = carCFrame.UpVector * (StiffnessForce + DamperForce)
-
-					local RotationsOnlyWheelDirCFrame = CFrame.lookAt(Vector3.zero,carCFrame.LookVector,carCFrame.UpVector)
-
-					local LocalVelocity = RotationsOnlyWheelDirCFrame:ToObjectSpace(CFrame.new(carPrim:GetVelocityAtPosition(raycast.Position)))
-
-					local Xforce = carCFrame.RightVector * -LocalVelocity.x * props.wheelFriction
-					local Zforce = carCFrame.LookVector * LocalVelocity.z * (props.wheelFriction/3)
-
-					DisCarSpringLength[wheelName] = SpringLength
-
-					carPrim:ApplyImpulseAtPosition(SuspensionForceVec3 + Xforce + Zforce, raycast.Position)
-
-				else
-
-					DisCarSpringLength[wheelName] = props.SuspensionMaxLength
-
-				end
-
-				if VisualiseRaycast then
-
-					game.StarterGui.gaag.ag.CurrentCamera = workspace.Camera
-					game.StarterGui.gaag.ag2.CurrentCamera = workspace.Camera
-
-					coroutine.wrap(function()
-
-						local p = Instance.new("Part",game.StarterGui.gaag.ag)
-						p.Name = 'rayVis'
-						p.Color = Color3.new(0,0,1)
-						p.Anchored = true
-						p.CanCollide = false
-						p.Material = Enum.Material.Neon
-						p.Shape = Enum.PartType.Cylinder
-
-						local pe = p:Clone()
-						pe.Color = Color3.new(1,0,0)
-						pe.Parent = p.Parent
-
-						local Rdestination = (rayOrigin + rayDirection)
-						if raycast then
-
-							local rDist = (rayOrigin - raycast.Position).magnitude
-							local s = rayOrigin - carCFrame.UpVector * rDist/2
-
-							p.CFrame = CFrame.lookAt(s, s + carCFrame.RightVector,-carCFrame.LookVector)
-							p.Size = Vector3.new(rDist, 0.1, 0.1)
-
-							rDist = (raycast.Position - Rdestination).magnitude
-							s =  raycast.Position - carCFrame.UpVector * rDist/2
-
-							pe.Size = Vector3.new(rDist, 0.1, 0.1)
-							pe.CFrame = CFrame.lookAt(s, s + carCFrame.RightVector,-carCFrame.LookVector)
-
-
-						else
-
-							p.Size = Vector3.new((rayOrigin - Rdestination).magnitude, 0.1, 0.1)
-
-							local s = rayOrigin + rayDirection/2
-
-							p.CFrame = CFrame.lookAt(s, s + carCFrame.RightVector,-carCFrame.LookVector)
-
-							Rdestination = Rdestination + carCFrame.UpVector*0.02
-
-							pe.CFrame = CFrame.lookAt(Rdestination, Rdestination + carCFrame.RightVector,-carCFrame.LookVector)
-							pe.Size = Vector3.new(0,0.1,0.1)
-
-						end
-
-						local pp = p:Clone()
-							pp.Parent = game.StarterGui.gaag.ag2
-							pp.Size = p.Size + Vector3.new(0.01,0.01,0.01)
-
-							local ppe = pe:Clone()
-							ppe.Parent = pp.Parent
-							ppe.Size = pe.Size + Vector3.new(0.01,0.01,0.01)
-
-							game["Run Service"].Heartbeat:Wait()
-
-							pp:Destroy()
-							ppe:Destroy()
-
-							p:Destroy()
-							pe:Destroy()
-
-						end)()
-					end
-				end
-			end
-		end
-	end
+                        weld.C0 = weldInitPos
+                        if basePos.x > 0 then
+                            weld.C0 = weld.C0 * CFrame.Angles(0,math.rad(180),0)
+                            weld.C0 = weld.C0 * CFrame.Angles(-state.wheelRotation,0,0)
+                        else
+                            weld.C0 = weld.C0 * CFrame.Angles(state.wheelRotation,0,0)
+                        end
+                    end
+                end
+            end
+        end
+    end
 end
