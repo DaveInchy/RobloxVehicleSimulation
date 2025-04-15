@@ -5,10 +5,35 @@ local DEFAULT_PHYSICS_CONSTRAINTS = {
     MAX_SUSPENSION_FORCE = 5000,
     MIN_SUSPENSION_LENGTH = 0.2,
     MAX_LATERAL_FORCE = 2000,
-    MAX_TRACTION_FORCE = 2500
+    MAX_TRACTION_FORCE = 2500,
+    -- New physics properties
+    STEERING_DAMPING = 5.0, -- Higher = slower steering response
+    WEIGHT_TO_FRICTION_MULT = 0.1, -- Multiplier for weight-based friction
+    STATIC_FRICTION_THRESHOLD = 0.5, -- Speed below which static friction applies
+    STATIC_FRICTION_COEFFICIENT = 2.0, -- Multiplier for friction when nearly stopped
+    PARKING_BRAKE_FORCE = 10000 -- Force applied when parked/static friction active
 }
 
 local module = {
+
+	["TruckSemi"] = {
+		model = game.ReplicatedFirst:WaitForChild("Vehicles"):WaitForChild("TruckSemi"),
+		driverSeatName = "FL",
+
+		SuspensionMaxLength = 3.5,
+		wheelRadius = 4/2,
+
+		Stiffness = 200,
+		Damper = 3,
+		wheelFriction = 2.25,
+		torque = 30,
+		MaxSpeed = 70,
+		SteerAngle = 30,
+		SteeringSensitivity = 0.7, -- Slower steering for trucks
+		brakeForce = 200,
+		BoostForce = 20,
+		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
+	},
 
 	["Obey-EV"] = {
 		model = game.ReplicatedFirst:WaitForChild("Vehicles"):WaitForChild("Obey-EV"),
@@ -23,6 +48,7 @@ local module = {
 		torque = 50,
 		MaxSpeed = 100,
 		SteerAngle = 25,
+		SteeringSensitivity = 1.2, -- Responsive EV steering
 		brakeForce = 100,
 		BoostForce = 200,
 		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
@@ -41,6 +67,7 @@ local module = {
 		torque = 50,
 		MaxSpeed = 100,
 		SteerAngle = 25,
+		SteeringSensitivity = 1.1, -- Slightly quick steering
 		brakeForce = 100,
 		BoostForce = 200,
 		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
@@ -71,15 +98,6 @@ local module = {
 		SuspensionMaxLength = 1.5,
 		wheelRadius = 2.9/2,
 
-		Stiffness = 100,
-		Damper = 5,
-		wheelFriction = 2.25,
-		torque = 42,
-		MaxSpeed = 140,
-		SteerAngle = 24,
-		brakeForce = 100,
-		BoostForce = 50,
-		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
 	},
 
 	["Ubermacht-Cypher"] = {

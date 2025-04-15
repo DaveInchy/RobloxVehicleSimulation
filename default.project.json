@@ -10,6 +10,13 @@
       },
       "SwitchLight": {
         "$className": "RemoteEvent"
+      },
+      "SpawnPlayerCar": {
+        "$className": "RemoteEvent"
+      },
+      "Packages": {
+        "$className": "Folder",
+        "$path": "Packages"
       }
     },
 

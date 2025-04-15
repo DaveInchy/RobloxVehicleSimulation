@@ -1,8 +1,12 @@
+-- IMPORTANT: Do NOT use Network Ownership API (SetNetworkOwner, GetNetworkOwner, etc) in this client script!
+-- Network ownership is now handled exclusively by the server for all vehicles.
+-- The client should only handle input, UI, and local physics/visuals when seated.
+
 local VisualiseRaycast = false
 
 local carProps = require(game.ReplicatedStorage:WaitForChild("VehiclePropertiesList"))
 local VehiclePhysics = require(game.ReplicatedStorage:WaitForChild("VehiclePhysics"))
-local useState = require(game.ReplicatedStorage:WaitForChild("useState"))
+local useState = require(game.ReplicatedStorage.Modules:WaitForChild("useState"))
 local player = game.Players.LocalPlayer
 local char = player.Character or player.CharacterAdded:Wait()
 local PlrGui = player.PlayerGui
@@ -11,8 +15,7 @@ local RunService = game:GetService("RunService")
 PlrGui.gaag.ag:ClearAllChildren()
 PlrGui.gaag.ag2:ClearAllChildren()
 
-local humanoid = nil
-humanoid = (function() repeat task.wait() until char:FindFirstChild("Humanoid"); return char.Humanoid end)()
+local humanoid = (function() repeat task.wait() until char:FindFirstChild("Humanoid"); return char.Humanoid end)()
 
 local isBraking = false
 local isBoosting = false
@@ -114,12 +117,34 @@ humanoid.Seated:Connect(function(seated, seatPart)
 
             if not carPrim then return end
 
-            if carPrim.Anchored then
-                carPrim.Anchored = false
-            end
-
             local id = carModel:GetAttribute("id")
             local props = carProps[id]
+
+            -- Get the server ownership state
+            local serverOwnedState = useState(true, "ServerOwned", carModel)
+            local hasOwnership = false
+
+            -- Watch for ownership changes
+            local ownershipConnection = serverOwnedState.useEffect:Connect(function(isServerOwned)
+                hasOwnership = not isServerOwned -- We have ownership when server doesn't
+                if hasOwnership then
+                    print("Vehicle is now player-owned")
+                else
+                    print("Vehicle is now server-owned")
+                end
+            end)
+
+            -- Wait until we have ownership (server sets ServerOwned to false)
+            local startTime = os.clock()
+            local MAX_WAIT_TIME = 3 -- Maximum time to wait for ownership in seconds
+
+            while not hasOwnership do
+                if os.clock() - startTime > MAX_WAIT_TIME then
+                    warn("Timeout waiting for vehicle ownership")
+                    break
+                end
+                task.wait()
+            end
 
             -- Create new physics state for this vehicle session
             activeVehicleState = VehiclePhysics.createPhysicsState()
@@ -131,10 +156,10 @@ humanoid.Seated:Connect(function(seated, seatPart)
                 Braking = useState(false, "BrakingInput", carModel) -- Hook into existing state
             }
 
-            local isBraking = false -- Local variable for client-side brake detection
-            local serverTakeOverWait = 0 -- Initialize this variable for the scope
+            -- Start independent steering update loop after ownership delay
+            local steeringThread = startSteeringUpdateLoop(seatPart, carModel, props, activeVehicleState)
 
-            -- Set up steering state change listener that updates visuals regardless of ownership
+            -- Set up steering state change listener after ownership delay
             local steerConnection
             steerConnection = vehicleInputStates.Steer.useEffect:Connect(function(newSteerValue)
                 if not activeVehicleState then return end
@@ -156,6 +181,9 @@ humanoid.Seated:Connect(function(seated, seatPart)
                 -- Update visuals using current state
                 updateWheelVisuals(carModel, wheelStates, activeVehicleState)
             end)
+
+            local isBraking = false -- Local variable for client-side brake detection
+            local serverTakeOverWait = 0 -- Initialize this variable for the scope
 
             -- Bind Brake Action
             game.ContextActionService:BindAction("BrakeVehicle", function(_actionName, inputState, _inputObject)
@@ -180,9 +208,6 @@ humanoid.Seated:Connect(function(seated, seatPart)
             end, false, Enum.KeyCode.LeftShift)
 
             local lastUpdateTime = os.clock()
-
-            -- Start independent steering update loop
-            local steeringThread = startSteeringUpdateLoop(seatPart, carModel, props, activeVehicleState)
 
             while true do
                 local delta = RunService.Heartbeat:Wait()
@@ -237,6 +262,11 @@ humanoid.Seated:Connect(function(seated, seatPart)
                 steerConnection:Disconnect()
             end
 
+            -- Clean up the ownership connection when exiting
+            if ownershipConnection then
+                ownershipConnection:Disconnect()
+            end
+
             -- Fix the scope issue for serverTakeOverWait in exit handling
             -- The exit animation/logic should likely run regardless of the timer now,
             -- as the loop breaks when ownership is lost.
@@ -276,126 +306,112 @@ game.ContextActionService:BindAction('lightButton', function(n,istate,iobject)
 
 end, false, Enum.KeyCode.L)
 
+-- Remove the duplicate SwitchSeat binding and consolidate all F key functionality here
+game.ContextActionService:BindAction('EnterCar', function(_, inputState, _)
+    if inputState ~= Enum.UserInputState.Begin then return end
 
-game.ContextActionService:BindAction('EnterCar',function(n,istate,iobject)
+    if humanoid.SeatPart then -- Player is currently seated, handle exit
+        local currentSeat = humanoid.SeatPart
+        local carModel = currentSeat:FindFirstAncestorOfClass("Model")
+        local carPrim = carModel and carModel.PrimaryPart
 
-    if istate==Enum.UserInputState.Begin then
-
-        if humanoid.SeatPart then -- Player is currently seated, handle exit
-
-            local currentSeat = humanoid.SeatPart
-            local carModel = currentSeat:FindFirstAncestorOfClass("Model")
-            local carPrim = carModel and carModel.PrimaryPart
-
-            local curHingeConstraint = carModel and carPrim and carPrim:FindFirstChild(currentSeat.Name) -- Safer access
+        if carPrim then
+            local curHingeConstraint = carPrim:FindFirstChild(currentSeat.Name)
             if curHingeConstraint and curHingeConstraint:IsA("HingeConstraint") then
                 curHingeConstraint.TargetAngle = 90
+                task.wait(0.5) -- Wait for door animation
             end
 
-            -- Check if it's a VehicleSeat before accessing SeatWeld
+            -- Handle exit animation
             if currentSeat:IsA("VehicleSeat") then
                 local seatWeld = currentSeat:FindFirstChild("SeatWeld")
                 if seatWeld then
-                    game.TweenService:Create(seatWeld,TweenInfo.new(0.5),{
+                    game.TweenService:Create(seatWeld, TweenInfo.new(0.5), {
                         C1 = CFrame.new(),
-                        C0 = seatWeld.C0 * seatWeld.C1:Inverse() * CFrame.new(math.sign(curHingeConstraint and curHingeConstraint.Attachment0.Position.x or 1)*6,0,0)
+                        C0 = seatWeld.C0 * seatWeld.C1:Inverse() * CFrame.new(math.sign(curHingeConstraint and curHingeConstraint.Attachment0.Position.x or 1) * 6, 0, 0)
                     }):Play()
-                    wait(0.5)
-                else
-                    wait(0.5) -- Wait even if no weld animation
+                    task.wait(0.5)
                 end
-            else
-                wait(0.5) -- Wait if it's a regular seat
             end
 
             humanoid.Sit = false
+            game.ContextActionService:UnbindAction("BrakeVehicle")
+            isBraking = false
+        end
 
-            -- Anchor/Unanchor sequence on 'F' key exit
-            if carPrim then
-                carPrim.Anchored = true
-                task.wait(0.1) -- Brief anchor duration
-                carPrim.Anchored = false
+    else -- Player is not seated, handle enter
+        local nearestcar, nearestdist = nil, 24
+
+        -- Find nearest car
+        for _, v in pairs(workspace.Vehicles:GetChildren()) do
+            local primPart = v.PrimaryPart
+            if not primPart then continue end
+            local dist = (primPart.Position - char.HumanoidRootPart.Position).Magnitude
+
+            if dist < nearestdist then
+                nearestcar = v
+                nearestdist = dist
             end
+        end
 
-        else -- Player is not seated, handle enter
-            local nearestcar, nearestdist = nil, 10
+        if nearestcar then
+            -- Tell server to open door
+            game.ReplicatedStorage.AskForDoor:FireServer()
+            task.wait(0.2)
 
-            for i,v in pairs(workspace.Vehicles:GetChildren())do
-                local primPart = v.PrimaryPart
-                if not primPart then continue end -- Skip if no primary part
-                local dist = (primPart.Position - char.HumanoidRootPart.Position).Magnitude
-
-                if dist < nearestdist then
-                    nearestcar = v
-                    nearestdist = dist
-                end
-
-            end
-
-            if nearestcar then
-
-                local carRotations = CFrame.lookAt(Vector3.zero,nearestcar.PrimaryPart.CFrame.LookVector,nearestcar.PrimaryPart.CFrame.UpVector)
-
-                game.ReplicatedStorage.AskForDoor:FireServer()
-
-                wait(0.2)
-
-                local nearestseat, seatDist = nil, nearestdist -- Use nearestdist as initial max for seat
-                for i,v in pairs(nearestcar:GetChildren())do
-
-                    if (v:IsA('VehicleSeat') or v:IsA("Seat")) and not v.Occupant then
-                        local dist = (v.Position - char.HumanoidRootPart.Position).magnitude
-                        -- Check if it's the closest seat overall
-                        if not nearestseat or dist < seatDist then -- Use seatDist
-                            nearestseat = v
-                            seatDist = dist -- Update seatDist
-                        end
+            -- Find nearest seat
+            local nearestseat, seatDist = nil, nearestdist
+            for _, v in pairs(nearestcar:GetChildren()) do
+                if (v:IsA('VehicleSeat') or v:IsA("Seat")) and not v.Occupant then
+                    local dist = (v.Position - char.HumanoidRootPart.Position).Magnitude
+                    if dist < seatDist then
+                        nearestseat = v
+                        seatDist = dist
                     end
-
                 end
+            end
 
-                if nearestseat then
+            if nearestseat then
+                -- Store current position for animation
+                local curCFrame = char.HumanoidRootPart.CFrame
+                nearestseat:Sit(humanoid)
 
-                    local curCFram = char.HumanoidRootPart.CFrame
-                    nearestseat:Sit(humanoid)
+                -- Handle entry animation
+                if nearestseat:IsA("VehicleSeat") then
+                    local seatweld = nearestseat:WaitForChild("SeatWeld", 1) -- Increased timeout
+                    if seatweld then
+                        local oldC0 = seatweld.C0
+                        local oldC1 = seatweld.C1
+                        seatweld.C0 = nearestseat.CFrame:ToObjectSpace(curCFrame)
+                        seatweld.C1 = CFrame.new()
 
-                    -- Animation logic (already checks for VehicleSeat)
-                    if nearestseat:IsA("VehicleSeat") then
-                        local seatweld = nearestseat:WaitForChild("SeatWeld", 0.5) -- Add timeout
-                        if seatweld then
-                            local oldC0 = seatweld.C0
-                            local oldC1 = seatweld.C1
-                            seatweld.C0 = nearestseat.CFrame:ToObjectSpace(curCFram)
-                            seatweld.C1 = CFrame.new()
-                            game.TweenService:Create(seatweld,TweenInfo.new(0.35),{
-                                C1 = oldC1,
-                                C0 = oldC0
-                            }):Play()
-                            wait(0.2)
-                            local hinge = nearestcar.PrimaryPart:FindFirstChild(nearestseat.Name)
-                            if hinge and hinge:IsA("HingeConstraint") then
-                                hinge.TargetAngle = 0
-                            end
-                        end
-                    else
-                        -- Handle regular seats or cases where SeatWeld doesn't appear
-                        wait(0.2)
+                        -- Smooth entry animation
+                        game.TweenService:Create(seatweld, TweenInfo.new(0.35), {
+                            C1 = oldC1,
+                            C0 = oldC0
+                        }):Play()
+
+                        task.wait(0.2)
+                        -- Close door after entry
                         local hinge = nearestcar.PrimaryPart:FindFirstChild(nearestseat.Name)
                         if hinge and hinge:IsA("HingeConstraint") then
                             hinge.TargetAngle = 0
                         end
                     end
                 end
-
             end
-
         end
-
     end
+end, false, Enum.KeyCode.F)
 
-    -- Unbind Brake Action if player exits manually (redundant? Seated event handles unbind)
-    -- game.ContextActionService:UnbindAction("BrakeVehicle")
-    -- isBraking = false
-    -- Removed JumpOutDisabled check
-
-end,false,Enum.KeyCode.F)
+-- In the seated changed event
+humanoid:GetPropertyChangedSignal("Seated"):Connect(function()
+    if not humanoid.Seated then
+        -- Handle exit without anchoring
+        -- Keep any necessary cleanup code that doesn't involve anchoring
+        if steerConnection then
+            steerConnection:Disconnect()
+        end
+        vehicleInputStates = nil
+    end
+end)
