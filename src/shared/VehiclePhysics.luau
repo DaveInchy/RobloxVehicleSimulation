@@ -9,16 +9,26 @@ local RAYCAST_EXTRA_LENGTH = 2.0 -- How much further to cast the ray beyond max 
 
 local DEFAULT_PHYSICS_CONSTRAINTS = {
     MAX_SUSPENSION_FORCE = 5000,
-    MIN_SUSPENSION_LENGTH = 0.2,
+    MIN_SUSPENSION_LENGTH = 0.6,
     MAX_LATERAL_FORCE = 2000,
-    MAX_TRACTION_FORCE = 2500
+    MAX_TRACTION_FORCE = 2500,
+    STEERING_DAMPING = 5.0,
+    STATIC_FRICTION_THRESHOLD = 0.5,
+    WEIGHT_TO_FRICTION_MULT = 0.025,
+    STATIC_FRICTION_COEFFICIENT = 2.0,
+    PARKING_BRAKE_FORCE = 1000
 }
 
 type PhysicsConstraints = {
     MAX_SUSPENSION_FORCE: number,
     MIN_SUSPENSION_LENGTH: number, -- Added type
     MAX_LATERAL_FORCE: number,
-    MAX_TRACTION_FORCE: number
+    MAX_TRACTION_FORCE: number,
+    STEERING_DAMPING: number,
+    STATIC_FRICTION_THRESHOLD: number,
+    WEIGHT_TO_FRICTION_MULT: number,
+    STATIC_FRICTION_COEFFICIENT: number,
+    PARKING_BRAKE_FORCE: number
 }
 
 type VehicleProps = {
@@ -32,14 +42,18 @@ type VehicleProps = {
     SteerAngle: number,
     driverSeatName: string,
     brakeForce: number?,
-    PhysicsConstraints: PhysicsConstraints
+    PhysicsConstraints: PhysicsConstraints,
+    SteeringSensitivity: number?
 }
 
 type PhysicsState = {
     springLengthMemory: {[string]: number},
     steeringAngle: number,
     wheelRotations: {[string]: number},
-    lastUpdateTime: number
+    lastUpdateTime: number,
+    velocity: Vector3,
+    isParked: boolean,
+    wheelVelocities: {[string]: Vector3}
 }
 
 function VehiclePhysics.createPhysicsState(): PhysicsState
@@ -47,7 +61,10 @@ function VehiclePhysics.createPhysicsState(): PhysicsState
         springLengthMemory = {},
         steeringAngle = 0,
         wheelRotations = {},
-        lastUpdateTime = os.clock()
+        lastUpdateTime = os.clock(),
+        velocity = Vector3.new(0, 0, 0),
+        isParked = false,
+        wheelVelocities = {}
     }
 end
 
@@ -57,10 +74,42 @@ function VehiclePhysics.updateVehiclePhysics(carModel: Model, physicsState: Phys
     local carPrim = carModel.PrimaryPart
     if not carPrim then return end
 
-    -- Update steering angle based on input
-    local targetSteer = steerInput * props.SteerAngle
-    physicsState.steeringAngle = physicsState.steeringAngle +
-        (targetSteer - physicsState.steeringAngle) * math.min(1, delta * 10)
+    -- Calculate car mass and center of mass
+    local totalMass = 0
+    local centerOfMass = Vector3.new(0, 0, 0)
+    for _, part in pairs(carModel:GetDescendants()) do
+        if part:IsA("BasePart") then
+            totalMass += part.Mass
+            centerOfMass += part.Position * part.Mass
+        end
+    end
+    centerOfMass = centerOfMass / totalMass
+
+    -- Apply steering with sensitivity and damping
+    local targetSteerAngle = steerInput * props.SteerAngle
+    local steeringSensitivity = props.SteeringSensitivity or 1.0
+    local steeringDamping = constraints.STEERING_DAMPING or 5.0
+    local steerLerpRate = delta * steeringSensitivity * (1/steeringDamping)
+    if steerInput == 0 then
+        steerLerpRate = steerLerpRate * 5 -- Centering is 5x faster
+        physicsState.steeringAngle = physicsState.steeringAngle +
+            (0 - physicsState.steeringAngle) * math.min(1, steerLerpRate)
+    else
+        physicsState.steeringAngle = physicsState.steeringAngle +
+            (targetSteerAngle - physicsState.steeringAngle) * math.min(1, steerLerpRate)
+    end
+
+    -- Get car's current velocity
+    local carVelocity = carPrim.AssemblyLinearVelocity
+    local speed = carVelocity.Magnitude
+
+    -- Determine if we should enter parking/static friction mode
+    local isNearlyStatic = speed < (constraints.STATIC_FRICTION_THRESHOLD or 0.5)
+    if isNearlyStatic and (isBraking or physicsState.isParked) then
+        physicsState.isParked = true
+    elseif throttleInput ~= 0 or not isBraking then
+        physicsState.isParked = false
+    end
 
     local forces = {}
     local wheelStates = {}
@@ -219,6 +268,31 @@ function VehiclePhysics.calculateWheelPhysics(carModel: Model, wheelName: string
 
             physicsState.springLengthMemory[wheelName] = SpringLength
 
+            -- Calculate weight distribution
+            local wheelPos = carModel.Wheels:FindFirstChild(wheelName).PrimaryPart.Position
+            local distanceFromCoM = (wheelPos - carPrim.Position).Magnitude
+            local weightOnWheel = carPrim.Mass * workspace.Gravity * (1 / distanceFromCoM)
+
+            -- Calculate friction based on weight
+            local baseFriction = props.wheelFriction
+            local weightFrictionMult = constraints.WEIGHT_TO_FRICTION_MULT or 0.1
+            local effectiveFriction = baseFriction + (weightOnWheel * weightFrictionMult)
+
+            -- Apply static friction when nearly stopped
+            if physicsState.isParked then
+                effectiveFriction *= constraints.STATIC_FRICTION_COEFFICIENT or 2.0
+            end
+
+            -- Apply parking brake force if needed
+            if physicsState.isParked then
+                local wheelVel = carModel.Wheels:FindFirstChild(wheelName).PrimaryPart.AssemblyAngularVelocity
+                -- Apply opposing force based on current velocity
+                local opposingForce = -wheelVel.Unit * constraints.PARKING_BRAKE_FORCE
+                -- Also apply downward force to prevent bouncing
+                local verticalForce = Vector3.new(0, -constraints.PARKING_BRAKE_FORCE * 0.5, 0)
+                carModel.Wheels:FindFirstChild(wheelName).PrimaryPart:ApplyImpulse((opposingForce + verticalForce) * delta)
+            end
+
             return {
                 onGround = true,
                 forces = {
@@ -228,7 +302,9 @@ function VehiclePhysics.calculateWheelPhysics(carModel: Model, wheelName: string
                     applicationPoint = raycast.Position
                 },
                 springLength = SpringLength,
-                wheelRotation = physicsState.wheelRotations[wheelName]
+                wheelRotation = physicsState.wheelRotations[wheelName],
+                friction = effectiveFriction,
+                isParked = physicsState.isParked
             }
         else
             -- Ray hit ground, but BEYOND suspension range - treat as air for physics
@@ -236,7 +312,9 @@ function VehiclePhysics.calculateWheelPhysics(carModel: Model, wheelName: string
             return {
                 onGround = false, -- No forces applied
                 springLength = props.SuspensionMaxLength, -- Visually fully extended
-                wheelRotation = physicsState.wheelRotations[wheelName]
+                wheelRotation = physicsState.wheelRotations[wheelName],
+                friction = props.wheelFriction,
+                isParked = physicsState.isParked
             }
         end
     else
@@ -245,7 +323,9 @@ function VehiclePhysics.calculateWheelPhysics(carModel: Model, wheelName: string
         return {
             onGround = false,
             springLength = props.SuspensionMaxLength,
-            wheelRotation = physicsState.wheelRotations[wheelName]
+            wheelRotation = physicsState.wheelRotations[wheelName],
+            friction = props.wheelFriction,
+            isParked = physicsState.isParked
         }
     end
 end

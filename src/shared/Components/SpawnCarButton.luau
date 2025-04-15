@@ -14,7 +14,7 @@ function SpawnCarButton:render()
     local scale = self.state.pressed and 1.1 or (self.state.hovered and 1.05 or 1)
     return Roact.createElement("ImageButton", {
         Size = UDim2.new(0, 220 *scale, 0, 60 *scale),
-        Position = UDim2.new(0.5, -110, 0.85, 0),
+        Position = UDim2.new(0.5, 0, 0.85, 0),
         AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Color3.fromRGB(40, 180, 255),
         BorderSizePixel = 0,
@@ -37,9 +37,9 @@ function SpawnCarButton:render()
         UIText = Roact.createElement("TextLabel", {
             Size = UDim2.new(1, 0, 1, 0),
             BackgroundTransparency = 1,
-            Text = "🚗 Spawn Vehicle",
+            Text = "Spawn Vehicle",
             TextColor3 = Color3.new(1, 1, 1),
-            Font = Enum.Font.GothamBold,
+            Font = Enum.Font.BuilderSansExtraBold,
             TextScaled = true,
         })
     })

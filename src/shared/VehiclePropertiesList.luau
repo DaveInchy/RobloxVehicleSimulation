@@ -14,7 +14,28 @@ local DEFAULT_PHYSICS_CONSTRAINTS = {
     PARKING_BRAKE_FORCE = 10000 -- Force applied when parked/static friction active
 }
 
+local DEFAULT_STEER_ANGLE = 25
+local DEFAULT_STEERING_SENSITIVITY = 1.0
+
 local module = {
+	["TruckBus"] = {
+		model = game.ReplicatedFirst:WaitForChild("Vehicles"):WaitForChild("TruckBus"),
+		driverSeatName = "FL",
+
+		SuspensionMaxLength = 3.5,
+		wheelRadius = 4/2,
+
+		Stiffness = 200,
+		Damper = 5,
+		wheelFriction = 2.8,
+		torque = 40,
+		MaxSpeed = 70,
+		SteerAngle = 30,
+		SteeringSensitivity = 5, -- Slower steering for trucks
+		brakeForce = 200,
+		BoostForce = 20,
+		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
+	},
 
 	["TruckSemi"] = {
 		model = game.ReplicatedFirst:WaitForChild("Vehicles"):WaitForChild("TruckSemi"),
@@ -24,12 +45,12 @@ local module = {
 		wheelRadius = 4/2,
 
 		Stiffness = 200,
-		Damper = 3,
-		wheelFriction = 2.25,
-		torque = 30,
+		Damper = 5,
+		wheelFriction = 2.8,
+		torque = 40,
 		MaxSpeed = 70,
 		SteerAngle = 30,
-		SteeringSensitivity = 0.7, -- Slower steering for trucks
+		SteeringSensitivity = 5, -- Slower steering for trucks
 		brakeForce = 200,
 		BoostForce = 20,
 		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
@@ -42,15 +63,15 @@ local module = {
 		SuspensionMaxLength = 1.6,
 		wheelRadius = 2.9/2,
 
-		Stiffness = 250,
+		Stiffness = 100,
 		Damper = 5,
-		wheelFriction = 2,
-		torque = 50,
-		MaxSpeed = 100,
-		SteerAngle = 25,
-		SteeringSensitivity = 1.2, -- Responsive EV steering
+		wheelFriction = 2.25,
+		torque = 42,
+		MaxSpeed = 140,
+		SteerAngle = 24,
+		SteeringSensitivity = 10, -- Responsive EV steering
 		brakeForce = 100,
-		BoostForce = 200,
+		BoostForce = 50,
 		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
 	},
 
@@ -61,32 +82,34 @@ local module = {
 		SuspensionMaxLength = 1.6,
 		wheelRadius = 2.725/2,
 
-		Stiffness = 250,
+
+		Stiffness = 100,
 		Damper = 5,
-		wheelFriction = 2,
-		torque = 50,
-		MaxSpeed = 100,
-		SteerAngle = 25,
-		SteeringSensitivity = 1.1, -- Slightly quick steering
+		wheelFriction = 2.25,
+		torque = 42,
+		MaxSpeed = 140,
+		SteerAngle = 24,
+		SteeringSensitivity = 10, -- Responsive EV steering
 		brakeForce = 100,
-		BoostForce = 200,
+		BoostForce = 50,
 		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
 	},
 
 	["Obey-TenF"] = {
 		model = game.ReplicatedFirst:WaitForChild("Vehicles"):WaitForChild("Obey-TenF"),
-		driverSeatName = "FL",
+	driverSeatName = "FL",
 
 		SuspensionMaxLength = 1.5,
-		wheelRadius = 2.74/2,
+		wheelRadius = 2.9/2,
 
-		Stiffness = 160,
+		Stiffness = 100,
 		Damper = 5,
-		wheelFriction = 2,
-		torque = 32,
-		MaxSpeed = 200,
+		wheelFriction = 2.25,
+		torque = 42,
+		MaxSpeed = 140,
 		SteerAngle = 24,
-		brakeForce = 80,
+		SteeringSensitivity = 10, -- Responsive EV steering
+		brakeForce = 100,
 		BoostForce = 50,
 		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
 	},
@@ -98,6 +121,17 @@ local module = {
 		SuspensionMaxLength = 1.5,
 		wheelRadius = 2.9/2,
 
+
+		Stiffness = 100,
+		Damper = 5,
+		wheelFriction = 2.25,
+		torque = 42,
+		MaxSpeed = 140,
+		SteerAngle = 24,
+		SteeringSensitivity = 10, -- Responsive EV steering
+		brakeForce = 100,
+		BoostForce = 50,
+		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
 	},
 
 	["Ubermacht-Cypher"] = {
@@ -107,14 +141,15 @@ local module = {
 		SuspensionMaxLength = 1.6,
 		wheelRadius = 2.725/2,
 
-		Stiffness = 250,
+		Stiffness = 100,
 		Damper = 5,
-		wheelFriction = 2,
-		torque = 50,
-		MaxSpeed = 100,
-		SteerAngle = 25,
+		wheelFriction = 2.25,
+		torque = 42,
+		MaxSpeed = 140,
+		SteerAngle = 24,
+		SteeringSensitivity = 10, -- Responsive EV steering
 		brakeForce = 100,
-		BoostForce = 200,
+		BoostForce = 50,
 		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
 	},
 
@@ -125,14 +160,15 @@ local module = {
 		SuspensionMaxLength = 1.6,
 		wheelRadius = 2.9/2,
 
-		Stiffness = 250,
+		Stiffness = 100,
 		Damper = 5,
-		wheelFriction = 2,
-		torque = 50,
-		MaxSpeed = 100,
-		SteerAngle = 25,
+		wheelFriction = 2.25,
+		torque = 42,
+		MaxSpeed = 140,
+		SteerAngle = 24,
+		SteeringSensitivity = 10, -- Responsive EV steering
 		brakeForce = 100,
-		BoostForce = 200,
+		BoostForce = 50,
 		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
 	},
 
@@ -143,14 +179,15 @@ local module = {
 		SuspensionMaxLength = 1.6,
 		wheelRadius = 3/2,
 
-		Stiffness = 250,
+		Stiffness = 100,
 		Damper = 5,
-		wheelFriction = 2,
-		torque = 50,
-		MaxSpeed = 100,
-		SteerAngle = 25,
+		wheelFriction = 2.25,
+		torque = 42,
+		MaxSpeed = 140,
+		SteerAngle = 24,
+		SteeringSensitivity = 10, -- Responsive EV steering
 		brakeForce = 100,
-		BoostForce = 200,
+		BoostForce = 50,
 		PhysicsConstraints = DEFAULT_PHYSICS_CONSTRAINTS
 	},
 }

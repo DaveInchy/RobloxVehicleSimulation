@@ -27,103 +27,69 @@ local function AddCar(obj, _cprops) -- Mark cprops as unused
 		end
 	end
 
-	table.insert(ExistingCarsTable,obj)
-	-- Only set network ownership if the PrimaryPart is not anchored and not welded to an anchored part
-	if obj.PrimaryPart and not obj.PrimaryPart.Anchored then
-		local isWeldedToAnchored = false
-		for _, constraint in ipairs(obj.PrimaryPart:GetConnectedParts(true)) do
-			if constraint.Anchored then
-				isWeldedToAnchored = true
-				break
-			end
-		end
-		if not isWeldedToAnchored then
-			obj.PrimaryPart:SetNetworkOwner(nil)
-		end
-	end
+	table.insert(ExistingCarsTable, obj)
+
+	-- Initialize server-side states
 	AllCarsMemory[obj] = {}
 	AllCarsMemory[obj].SpringLengthMemory = {}
-	PhysicsStates[obj] = VehiclePhysics.createPhysicsState() -- Initialize physics state
+	PhysicsStates[obj] = VehiclePhysics.createPhysicsState()
 
-	-- Initialize input states using useState, parented to the car model
+	-- Initialize input states using useState
 	VehicleInputStates[obj] = {
-		Throttle = useState(0, "ThrottleInput", obj), -- Initial value 0
-		Steer = useState(0, "SteerInput", obj),    -- Initial value 0
-		Braking = useState(false, "BrakingInput", obj), -- Initial value false
-		IsServerOwned = useState(true, "ServerOwned", obj) -- Add ownership state
+		Throttle = useState(0, "ThrottleInput", obj),
+		Steer = useState(0, "SteerInput", obj),
+		Braking = useState(false, "BrakingInput", obj),
+		IsServerOwned = useState(true, "ServerOwned", obj)
 	}
 
-	for wheelName, _ in pairs(carProps.getWheelPositions(obj)) do -- Mark v as unused
-		AllCarsMemory[obj].SpringLengthMemory[wheelName] = 1.2 -- Use wheelName as key
+	-- Set up wheel memory
+	for wheelName, _ in pairs(carProps.getWheelPositions(obj)) do
+		AllCarsMemory[obj].SpringLengthMemory[wheelName] = 1.2
 	end
-	-- Handle seat occupant changes
-	obj:FindFirstChildOfClass('VehicleSeat'):GetPropertyChangedSignal('Occupant'):Connect(function()
-		local seatPart = obj:FindFirstChildOfClass('VehicleSeat')
-		local occ = seatPart.Occupant
-		local carPrim = obj.PrimaryPart
 
-		if occ then
-			local player = game.Players:GetPlayerFromCharacter(occ.Parent)
-			if player and carPrim then
-				pcall(function()
+	-- Handle seat occupancy changes
+	local driverSeat = obj:FindFirstChildOfClass('VehicleSeat')
+	if driverSeat then
+		driverSeat:GetPropertyChangedSignal('Occupant'):Connect(function()
+			local occ = driverSeat.Occupant
+			local carPrim = obj.PrimaryPart
+			if not carPrim then return end
+			if occ then
+				local player = game.Players:GetPlayerFromCharacter(occ.Parent)
+				if player then
 					carPrim:SetNetworkOwner(player)
-					VehicleInputStates[obj].IsServerOwned:set(false) -- Update ownership state
-				end)
-			end
-		else
-			 -- Set owner to server *after* ensuring unanchored
-			if carPrim then
-				pcall(function()
-					carPrim:SetNetworkOwner(nil)
-					VehicleInputStates[obj].IsServerOwned:set(true) -- Update ownership state
-				end)
-			end
-		end
-	end)
-
-	for i,v in pairs(obj:GetChildren())do
-		if v:IsA("Seat")then
-			v:GetPropertyChangedSignal('Occupant'):Connect(function()--event if seat's occupant value changed
-				local carPrim = obj.PrimaryPart -- Get PrimaryPart again for this scope
-				if v.Occupant then
-					local player = game.Players:GetPlayerFromCharacter(v.Occupant.Parent)
-					if player then--if not npc
-						-- Ensure unanchored before setting owner (server-side for other seats)
-						if carPrim and carPrim.Anchored then
-							carPrim.Anchored = false
-						end
-						-- Don't change owner if it's already the player in the driver seat
-						--[[ wait()
-						if obj.PrimaryPart:GetNetworkOwner()==player then
-							obj.PrimaryPart:SetNetworkOwner(nil)
-						end ]]-- Logic seems redundant/potentially problematic, commented out
-					end
-				else -- Occupant left a non-driver seat
-					-- No need to anchor/unanchor here, driver seat logic handles ownership
+					print("[SERVER DEBUG] SetNetworkOwner to", player.Name, "Current owner:", tostring(carPrim:GetNetworkOwner()))
 				end
-			end)
-		end
+			else
+				carPrim:SetNetworkOwner(nil)
+				print("[SERVER DEBUG] SetNetworkOwner to nil (server). Current owner:", tostring(carPrim:GetNetworkOwner()))
+			end
+		end)
 	end
-	--wheels
-	local WheelFolder = Instance.new("Folder",obj)
+
+	-- Set up wheels
+	local WheelFolder = Instance.new("Folder", obj)
 	WheelFolder.Name = 'Wheels'
 
-	for i,v in pairs(carProps.getWheelPositions(obj))do
-
+	for i, v in pairs(carProps.getWheelPositions(obj)) do
 		local ClonedWheel = carProps.getWheelModel(obj)
 		ClonedWheel.Parent = WheelFolder
 		ClonedWheel.Name = i
 
-		local wheelParts = ClonedWheel:GetChildren();
-		for k,v in pairs(wheelParts) do
-			v.CanCollide = false
+		for _, part in pairs(ClonedWheel:GetDescendants()) do
+			if part:IsA("BasePart") then
+				part.CanCollide = false
+			end
 		end
 
-		local weld = Instance.new("Weld",ClonedWheel)
+		local weld = Instance.new("Weld", ClonedWheel)
 		weld.Part0 = obj.PrimaryPart
 		weld.Part1 = ClonedWheel.PrimaryPart
 		weld.C0 = CFrame.new(carProps.getWheelPositions(obj)[i])
 		if v.x > 0 then
+			weld.C0 = weld.C0 * CFrame.Angles(0, 0, 0)
+		end
+		if v.x < 0 then
 			weld.C0 = weld.C0 * CFrame.Angles(0, math.rad(180), 0)
 		end
 	end
@@ -135,33 +101,45 @@ end
 
 -- Add listener for cars added after initialization
 VehicleFolder.ChildAdded:Connect(function(child)
-	-- Optionally check if it's a valid car model (has PrimaryPart, etc.)
-	if child:IsA("Model") and child.PrimaryPart then
-		AddCar(child)
-	end
+    if child:IsA("Model") then
+        if child.PrimaryPart then
+            AddCar(child)
+        else
+            child:GetPropertyChangedSignal("PrimaryPart"):Connect(function()
+                if child.PrimaryPart then
+                    AddCar(child)
+                end
+            end)
+        end
+    end
 end)
 
 local function SpawnCar(carName)
+    local props = carProps[carName]
+    if not props then return end
 
-	-- reading VehiclePropertiesList
-	local props = carProps[carName]
+    local clonedCar = props.model:Clone()
+    clonedCar.Parent = workspace.Vehicles
+    clonedCar:SetAttribute("id", carName)
 
-	if props then
+    -- Move to spawn position before adding physics
+    local spawnPos = Vector3.new(math.random(-50,50), 10, math.random(-50,50))
+    clonedCar:PivotTo(CFrame.new(spawnPos))
 
-		--remember that it is what it is
-		local clonedCar = props.model:Clone()
+    -- Initialize the car's physics and components
+    AddCar(clonedCar, props)
 
-		clonedCar.Parent = workspace.Vehicles
-		clonedCar:MoveTo(Vector3.new(math.random(-50,50),10,math.random(-50,50)))
-		clonedCar:SetAttribute("id",carName)
+    -- Make sure network ownership is properly set
+    if clonedCar.PrimaryPart then
+        task.spawn(function()
+            pcall(function()
+                clonedCar.PrimaryPart:SetNetworkOwner(nil)
+            end)
+        end)
+    end
 
-		AddCar(clonedCar,props)
-
-		return clonedCar
-	end
+    return clonedCar
 end
-
-
 
 for _, v in pairs(game.ReplicatedFirst.Vehicles:GetChildren()) do
 	SpawnCar(v.Name)
@@ -306,18 +284,75 @@ SpawnPlayerCarEvent.OnServerEvent:Connect(function(player)
 	end
 end)
 
-while true do
-    local delta = game["Run Service"].PreSimulation:Wait()
+local RunService = game:GetService("RunService")
+local PHYSICS_WAKE_INTERVAL = 2 -- seconds
+
+local lastWakeNudge = {}
+
+local REST_STATIC_VEL = 1 -- below this velocity is considered nearly static
+local REST_STATIC_SUSP = 1 -- below this suspension delta is considered nearly static
+local REST_TIME = 3 -- seconds to enter resting state
+local carRestTimers = {}
+local carIsResting = {}
+
+RunService.Heartbeat:Connect(function(delta)
+    local now = os.clock()
     local success, err = pcall(function()
         for _, carModel in pairs(ExistingCarsTable) do
+            if not carModel or not carModel.Parent then
+                print("[DEBUG] Skipping carModel: missing or not in workspace", carModel)
+                continue
+            end
             local carPrim = carModel.PrimaryPart or carModel:FindFirstChild("Main Part")
-            if not carPrim then continue end
+            if not carPrim then
+                print("[DEBUG] Skipping carModel: missing PrimaryPart", carModel)
+                continue
+            end
+
+            -- Nudge physics every PHYSICS_WAKE_INTERVAL seconds
+            lastWakeNudge[carModel] = lastWakeNudge[carModel] or 0
+            if now - lastWakeNudge[carModel] > PHYSICS_WAKE_INTERVAL then
+                carPrim:ApplyImpulse(Vector3.new(1e-3, 0, 0))
+                lastWakeNudge[carModel] = now
+            end
+
+            -- Resting state logic
+            carRestTimers[carModel] = carRestTimers[carModel] or 0
+            carIsResting[carModel] = carIsResting[carModel] or false
+
+            local isNearlyStatic = carPrim.AssemblyLinearVelocity.Magnitude < REST_STATIC_VEL and carPrim.AssemblyAngularVelocity.Magnitude < REST_STATIC_VEL
+            local suspIsStatic = true
+            local physicsState = PhysicsStates[carModel]
+            if physicsState and physicsState.springLengthMemory then
+                for _, v in pairs(physicsState.springLengthMemory) do
+                    if math.abs(v - (physicsState.lastSpring or v)) > REST_STATIC_SUSP then
+                        suspIsStatic = false
+                        break
+                    end
+                end
+                physicsState.lastSpring = physicsState.springLengthMemory and next(physicsState.springLengthMemory) and physicsState.springLengthMemory[next(physicsState.springLengthMemory)] or 0
+            end
+
+            if isNearlyStatic and suspIsStatic then
+                carRestTimers[carModel] = carRestTimers[carModel] + delta
+                if carRestTimers[carModel] > REST_TIME and not carIsResting[carModel] then
+                    -- Enter resting state
+                    carPrim.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    carPrim.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                    carIsResting[carModel] = true
+                end
+            else
+                carRestTimers[carModel] = 0
+                if carIsResting[carModel] then
+                    carIsResting[carModel] = false
+                end
+            end
 
             -- Check network ownership without anchoring checks
             local isNetworkOwned = carPrim:GetNetworkOwner() ~= nil
 
             -- Only process physics if server owns the car
-            if not isNetworkOwned then
+            if not isNetworkOwned and not carIsResting[carModel] then
                 local id = carModel:GetAttribute("id")
                 local props = carProps[id]
                 local inputStates = VehicleInputStates[carModel]
@@ -358,23 +393,36 @@ while true do
                 -- Update visual wheel rotations
                 if wheelStates then
                     for wheelName, state in pairs(wheelStates) do
-                        local wheel = carModel.Wheels:FindFirstChild(wheelName)
-                        if wheel and wheel:FindFirstChild("Weld") then
-                            local weld = wheel.Weld
-                            local basePos = carProps.getWheelPositions(carModel)[wheelName]
+                        local wheel = carModel.Wheels and carModel.Wheels:FindFirstChild(wheelName)
+                        if not wheel or not wheel:FindFirstChild("Weld") then
+                            print("[DEBUG] Wheel or Weld missing for", wheelName, carModel)
+                            continue
+                        end
+                        local weld = wheel.Weld
+                        local basePos = carProps.getWheelPositions(carModel)[wheelName]
 
-                            local weldInitPos = CFrame.new(basePos - Vector3.new(0, state.springLength, 0))
-                            if string.sub(wheelName,1,1)=='F' then
-                                weldInitPos = weldInitPos * CFrame.Angles(0,-math.rad(PhysicsStates[carModel].steeringAngle),0)
-                            end
+                        local weldInitPos = CFrame.new(basePos - Vector3.new(0, state.springLength, 0))
+                        if string.sub(wheelName,1,1)=='F' then
+                            weldInitPos = weldInitPos * CFrame.Angles(0,-math.rad(PhysicsStates[carModel].steeringAngle),0)
+                        end
 
-                            weld.C0 = weldInitPos
-                            if basePos.x > 0 then
-                                weld.C0 = weld.C0 * CFrame.Angles(0,math.rad(180),0)
-                                weld.C0 = weld.C0 * CFrame.Angles(-state.wheelRotation,0,0)
-                            else
-                                weld.C0 = weld.C0 * CFrame.Angles(state.wheelRotation,0,0)
-                            end
+                        weld.C0 = weldInitPos
+                        if basePos.x > 0 then
+                            weld.C0 = weld.C0 * CFrame.Angles(0,0,0)
+                            weld.C0 = weld.C0 * CFrame.Angles(-state.wheelRotation,0,0)
+                        else
+                            weld.C0 = weld.C0 * CFrame.Angles(state.wheelRotation,0,0)
+                            weld.C0 = weld.C0 * CFrame.Angles(0, math.rad(180), 0)
+                        end
+                        -- Debug: Raycast check
+                        local rayOrigin = carPrim.CFrame:ToWorldSpace(CFrame.new(basePos)).p
+                        local rayLength = (props.SuspensionMaxLength or 1.5) + (props.wheelRadius or 1) + 2.0
+                        local rayDirection = -carPrim.CFrame.UpVector * rayLength
+                        local rayParams = RaycastParams.new()
+                        rayParams.FilterDescendantsInstances = {carModel}
+                        local raycast = workspace:Raycast(rayOrigin, rayDirection, rayParams)
+                        if not raycast then
+                            print("[DEBUG] Raycast miss for wheel", wheelName, "car", carModel.Name)
                         end
                     end
                 end
@@ -384,4 +432,4 @@ while true do
     if not success then
         warn("[Vehicle Loop Error]:", err)
     end
-end
+end)
