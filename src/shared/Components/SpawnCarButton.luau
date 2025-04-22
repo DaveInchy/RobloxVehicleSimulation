@@ -14,9 +14,9 @@ function SpawnCarButton:render()
     local scale = self.state.pressed and 1.1 or (self.state.hovered and 1.05 or 1)
     return Roact.createElement("ImageButton", {
         Size = UDim2.new(0, 220 *scale, 0, 60 *scale),
-        Position = UDim2.new(0.5, 0, 0.85, 0),
+        Position = UDim2.new(0.5, 0, 1, -70),
         AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundColor3 = Color3.fromRGB(40, 180, 255),
+        BackgroundColor3 = Color3.fromRGB(255, 65, 40),
         BorderSizePixel = 0,
         [Roact.Event.MouseEnter] = function()
             self:setState({hovered = true})
@@ -31,7 +31,6 @@ function SpawnCarButton:render()
             self:setState({pressed = false})
             SpawnPlayerCarEvent:FireServer()
         end,
-        [Roact.Event.Activated] = nil, -- Remove Activated event
     }, {
         UICorner = Roact.createElement("UICorner", {CornerRadius = UDim.new(0, 18)}),
         UIText = Roact.createElement("TextLabel", {

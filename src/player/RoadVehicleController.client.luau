@@ -1,8 +1,15 @@
 local _VisualiseRaycast = false -- Prefix with _ since unused
 
-local carProps = require(game.ReplicatedStorage:WaitForChild("VehiclePropertiesList"))
-local VehiclePhysics = require(game.ReplicatedStorage:WaitForChild("VehiclePhysics"))
-local useState = require(game.ReplicatedStorage.Modules:WaitForChild("useState"))
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Modules = ReplicatedStorage:WaitForChild("Modules")
+local VehicleModules = Modules:WaitForChild("Vehicle")
+local Debris = game:GetService("Debris") -- Add Debris service
+
+local carProps = require(VehicleModules:WaitForChild("VehiclePropertiesList"))
+local VehiclePhysics = require(VehicleModules:WaitForChild("VehiclePhysics"))
+local VehicleCamera = require(VehicleModules:WaitForChild("VehicleCamera"))
+local VehicleEffects = require(VehicleModules:WaitForChild("VehicleEffects"))
+local useState = require(Modules:WaitForChild("useState"))
 local player = game.Players.LocalPlayer
 local char = player.Character or player.CharacterAdded:Wait()
 local PlrGui = player.PlayerGui
@@ -26,9 +33,23 @@ humanoid = initHumanoid()
 local isBraking = false
 local isBoosting = false
 local activeVehicleState = nil
+local activeVehicleCamera = nil -- Added for camera instance
+local activeVehicleEffects = nil -- Added for effects instance
+local activeBurnoutEffects = {} -- Table to store handles for continuous burnout effects { [wheelName]: {smoke=instance, sound=instance} }
+local activeSkidTrails = {} -- Table to store handles for skid trails { [wheelName]: {trail=instance, attachment0=instance, attachment1=instance} }
 local vehicleInputStates = nil -- To store references to the useState objects
 local ownershipConnection = nil
 local steeringThread = nil
+
+-- Add per-wheel slip/skid state tracking
+local lastWheelSlipState = {} -- [wheelName] = {isSkidding = false, isSlipping = false}
+local lastWheelSkidState = {} -- [wheelName] = bool
+
+-- Add debounce for tire sounds and cooldown for car entry
+local slipTimers = {} -- [wheelName] = {skid = 0, slip = 0}
+local lastCarEntryTime = 0
+local CAR_ENTRY_COOLDOWN = 0.5
+local SLIP_DEBOUNCE = 0.12 -- seconds slip/skid must persist before sound
 
 -- Create a separate function for visual updates that can run regardless of network ownership
 local function updateWheelVisuals(carModel, wheelStates, physicsState)
@@ -61,6 +82,9 @@ end
 local function startSteeringUpdateLoop(seatPart, carModel, props, activeVehicleStateRef)
     local thread = coroutine.create(function()
         local lastSteerValue = 0
+        local constraints = props.PhysicsConstraints or DEFAULT_PHYSICS_CONSTRAINTS
+        local steeringSensitivity = props.SteeringSensitivity or 1.0
+        local steeringDamping = constraints.STEERING_DAMPING or 5.0
 
         while seatPart and carModel:IsDescendantOf(workspace) do
             local delta = RunService.RenderStepped:Wait()
@@ -70,10 +94,17 @@ local function startSteeringUpdateLoop(seatPart, carModel, props, activeVehicleS
 
             -- Only update if steering changed
             if currentSteer ~= lastSteerValue then
-                -- Update steering angle in our physics state
+                -- Update steering angle in our physics state with proper damping
                 local targetSteer = currentSteer * props.SteerAngle
+                local steerLerpRate = delta * steeringSensitivity * (1/steeringDamping)
+
+                -- Faster return to center (when steering input is 0)
+                if currentSteer == 0 then
+                    steerLerpRate = steerLerpRate * 2.5 -- Make centering 2.5x faster
+                end
+
                 activeVehicleStateRef.steeringAngle = activeVehicleStateRef.steeringAngle +
-                    (targetSteer - activeVehicleStateRef.steeringAngle) * math.min(1, delta * 10)
+                    (targetSteer - activeVehicleStateRef.steeringAngle) * math.min(1, steerLerpRate)
 
                 -- Update wheel visuals for steering
                 for wheelName, _ in pairs(carProps.getWheelPositions(carModel)) do
@@ -115,7 +146,9 @@ local function startSteeringUpdateLoop(seatPart, carModel, props, activeVehicleS
 end
 
 -- Clean up function to handle all disconnections and state resets
-local simRoutine = nil;
+-- Module state variables
+local simRoutine = nil
+local carModel = nil
 local function cleanupVehicle()
     if ownershipConnection then
         ownershipConnection:Disconnect()
@@ -140,13 +173,61 @@ local function cleanupVehicle()
     vehicleInputStates = nil
     isBraking = false
     isBoosting = false
-    simRoutine:Disconnect();
+    if simRoutine then
+        simRoutine:Disconnect();
+    end
+
+    -- Detach Camera
+    if activeVehicleCamera then
+        activeVehicleCamera:Detach()
+        activeVehicleCamera = nil
+    end
+
+    -- Stop any continuous vehicle effects
+    if activeVehicleEffects then
+        -- Stop Burnout
+        for _, handles in pairs(activeBurnoutEffects) do
+            activeVehicleEffects:StopBurnoutEffect(handles)
+        end
+        activeBurnoutEffects = {}
+
+        -- Stop and cleanup Skid Trails
+        for _, handles in pairs(activeSkidTrails) do
+            if handles.trail then
+                handles.trail:Destroy()
+            end
+            if handles.attachment0 then
+                handles.attachment0:Destroy()
+            end
+            if handles.attachment1 then
+                handles.attachment1:Destroy()
+            end
+        end
+        activeSkidTrails = {}
+
+        activeVehicleEffects:CleanupSkidSounds(carModel)
+        activeVehicleEffects = nil
+    end
+
+    print("[DEBUG] Vehicle control cleaned up.")
+end
+
+-- Type assertion for VehicleSeat properties
+local function getVehicleInputs(seat: BasePart)
+    local throttle = 0
+    local steer = 0
+    -- Cast to VehicleSeat and safely access properties
+    if seat:IsA("VehicleSeat") then
+        throttle = (seat :: VehicleSeat).ThrottleFloat
+        steer = (seat :: VehicleSeat).SteerFloat
+    end
+    return throttle, steer
 end
 
 humanoid.Seated:Connect(function(isSeated, seat)
     if isSeated and seat then
         if seat:IsA("VehicleSeat") and seat:FindFirstAncestor('Vehicles') then
-            local carModel = seat.Parent
+            carModel = seat.Parent
             local carPrim = carModel.PrimaryPart
             if not carPrim then return end
             -- Removed GetNetworkOwner() call (server-only API)
@@ -160,6 +241,14 @@ humanoid.Seated:Connect(function(isSeated, seat)
                 Steer = useState(0, "SteerInput", carModel),
                 Braking = useState(false, "BrakingInput", carModel)
             }
+
+            -- Attach Camera
+            activeVehicleCamera = VehicleCamera -- Use the required module
+            activeVehicleCamera:AttachToVehicle(carModel)
+
+            -- Initialize Effects Module (can be done once or per vehicle)
+            activeVehicleEffects = VehicleEffects.new() -- Use constructor instead of module directly
+
             steeringThread = startSteeringUpdateLoop(seat, carModel, props, activeVehicleState)
             -- Bind Brake Action (Space)
             ContextActionService:BindAction("BrakeVehicle", function(_actionName, inputState)
@@ -190,14 +279,15 @@ humanoid.Seated:Connect(function(isSeated, seat)
             end, false, Enum.KeyCode.P)
             -- Main control loop (no ownership wait)
 
-            simRoutine = RunService.Heartbeat:Connect(function(delta: number)
+            simRoutine = RunService.Stepped:Connect(function(delta: number)
                 if humanoid.Sit and seat:IsDescendantOf(workspace) then
                     local currentCarPrim = carModel.PrimaryPart
                     if not currentCarPrim then return end
-                    local currentThrottle = seat.ThrottleFloat
-                    local currentSteer = seat.SteerFloat
+                    local currentThrottle, currentSteer = getVehicleInputs(seat)
                     local currentBraking = isBraking
                     local currentBoosting = isBoosting
+                    local currentSpeed = currentCarPrim.AssemblyLinearVelocity.Magnitude
+
                     if vehicleInputStates then
                         vehicleInputStates.Throttle:set(currentThrottle)
                         vehicleInputStates.Steer:set(currentSteer)
@@ -214,10 +304,131 @@ humanoid.Seated:Connect(function(isSeated, seat)
                         props.PhysicsConstraints
                     )
                     updateWheelVisuals(carModel, wheelStates, activeVehicleState)
+
+                    -- Trigger Vehicle Effects based on wheelStates and vehicle state
+                    if activeVehicleEffects and wheelStates then
+                        for wheelName, state in pairs(wheelStates) do
+                            local wheelPart = carModel.Wheels:FindFirstChild(wheelName)
+                            if wheelPart and wheelPart.PrimaryPart then
+                                local wheelPrimary = wheelPart.PrimaryPart
+                                local isDoingBurnout = false
+                                local isDoingSkid = false
+
+                                -- Burnout Check (High throttle, high longitudinal slip, low speed, on ground)
+                                if currentThrottle > 1 and state.isSlipping and currentSpeed < 15 and state.onGround then -- @EDIT 1
+                                    isDoingBurnout = true
+                                    if not activeBurnoutEffects[wheelName] then
+                                        activeBurnoutEffects[wheelName] = activeVehicleEffects:PlayBurnoutEffect(carModel, wheelPart)
+                                    end
+                                end
+                                if not isDoingBurnout and activeBurnoutEffects[wheelName] then
+                                    activeVehicleEffects:StopBurnoutEffect(activeBurnoutEffects[wheelName])
+                                    activeBurnoutEffects[wheelName] = nil
+                                end
+
+                                -- Manage Skid Trail
+                                if not isDoingBurnout then
+                                    if state.isSkidding and state.onGround and currentSpeed > 20 and math.abs(state.lateralSlipRatio) > 0.8 then
+
+                                        isDoingSkid = true
+                                        local skidDirection = currentCarPrim.CFrame.RightVector * math.sign(state.lateralVelocityX)
+                                        local contactPoint = wheelPrimary.Position - Vector3.new(0, wheelPrimary.Size.Y / 2, 0)
+
+                                        if not activeSkidTrails[wheelName] then
+                                            -- Create Attachments
+                                            local att0 = Instance.new("Attachment")
+                                            att0.Name = wheelName .. "_SkidAtt0"
+                                            att0.Parent = workspace.Terrain
+                                            att0.WorldPosition = contactPoint
+
+                                            local att1 = Instance.new("Attachment")
+                                            att1.Name = wheelName .. "_SkidAtt1"
+                                            att1.Parent = workspace.Terrain
+                                            att1.WorldPosition = contactPoint - skidDirection * 0.1 -- Start slightly behind
+
+                                            -- Create Trail
+                                            local trail = activeVehicleEffects:createEffect("TireMarkTrail", workspace.Terrain, att0, att1)
+                                            if trail then
+                                                trail.Enabled = true
+                                                activeSkidTrails[wheelName] = { trail = trail, attachment0 = att0, attachment1 = att1 }
+                                                activeVehicleEffects:PlaySkidEffect(carModel, wheelPart, skidDirection)
+                                            else
+                                                att0:Destroy()
+                                                att1:Destroy()
+                                            end
+                                        else
+                                            -- Update existing attachments
+                                            local handles = activeSkidTrails[wheelName]
+                                            handles.attachment0.WorldPosition = contactPoint
+                                            handles.attachment1.WorldPosition = contactPoint - skidDirection * 0.1
+                                            -- Ensure trail is enabled if it was somehow disabled
+                                            if not handles.trail.Enabled then
+                                                handles.trail.Enabled = true
+                                            end
+                                        end
+                                    end
+                                end
+
+                                -- Stop Skid Trail if conditions are no longer met
+                                if not isDoingSkid and activeSkidTrails[wheelName] then
+                                    local handles = activeSkidTrails[wheelName]
+
+                                    print("[DEBUG] Skid END for wheel:", wheelName)
+                                    activeVehicleEffects:StopSkidSound(carModel, wheelPart)
+
+                                    if handles.trail then
+                                        handles.trail.Enabled = false
+                                    end
+                                    -- Disable first
+                                    -- Use Debris to clean up after trail fades
+                                    if handles.trail then
+                                        Debris:AddItem(handles.trail, handles.trail.Lifetime + 0.5)
+                                    end
+                                    if handles.attachment0 then
+                                        Debris:AddItem(handles.attachment0, handles.trail.Lifetime + 0.5)
+                                    end
+                                    if handles.attachment1 then
+                                        Debris:AddItem(handles.attachment1, handles.trail.Lifetime + 0.5)
+                                    end
+                                    activeSkidTrails[wheelName] = nil
+                                end
+
+                                -- Play other effects only if not doing a burnout or skid
+                                if not isDoingBurnout and not isDoingSkid then
+                                    -- Skidding Effect (Lateral Slip
+
+                                    local lateralSpeed = math.abs(state.lateralVelocityX);
+                                    local forwardSpeed = carPrim.AssemblyLinearVelocity.Magnitude;
+
+                                    if (state.isSkidding and state.onGround) and (forwardSpeed > 20
+                                        and math.abs(state.lateralSlipRatio) > 0.8) then
+                                        print("[DEBUG] Skid START for wheel:", wheelName)
+                                        activeVehicleEffects:PlaySkidSound(carModel, wheelPart)
+                                        isDoingSkid = true
+                                        -- Calculate skid direction (vehicle's right vector, scaled by lateral velocity direction)
+                                        local skidDirection = currentCarPrim.CFrame.RightVector * math.sign(state.lateralVelocityX)
+                                        activeVehicleEffects:PlaySkidEffect(carModel, wheelPart, skidDirection)
+                                    end
+
+                                    --[[-- Slipping Effect (Longitudinal Slip - e.g., braking lockup or moderate acceleration slip)
+                                    -- Only play if not skidding (to avoid overlapping sounds/effects)
+                                    if not isDoingSkid and state.isSlipping and state.onGround and currentSpeed > 5 then
+                                        activeVehicleEffects:PlaySlipEffect(carModel, wheelPart)
+                                    end]]
+
+                                    -- Gravel/Surface Effect
+                                    if state.onGround and currentSpeed > 20 then -- Only play if moving
+                                        if state.surfaceMaterial == Enum.Material.Ground or state.surfaceMaterial == Enum.Material.Sand or state.surfaceMaterial == Enum.Material.Mud then
+                                            activeVehicleEffects:PlayGravelEffect(carModel, wheelPart)
+                                        end
+                                        -- TODO: Add checks for other surface types if needed
+                                    end
+                                end
+                            end
+                        end
+                    end
                 else
-
                     cleanupVehicle()
-
                 end
             end)
         end
@@ -248,11 +459,16 @@ ContextActionService:BindAction("EnterVehicle", function(_, inputState)
         humanoid.Sit = false
         return
     end
+    -- Car entry cooldown
+    if tick() - lastCarEntryTime < CAR_ENTRY_COOLDOWN then return end
+    lastCarEntryTime = tick()
     -- If not seated, try to enter the nearest car
     game.ReplicatedStorage.AskForDoor:FireServer()
     task.wait(0.2)
     local nearestcar, nearestdist = nil, 24
-    for _, v in pairs(workspace.Vehicles:GetChildren()) do
+    local vehicles = workspace.Vehicles:GetChildren()
+    for i = 1, #vehicles do
+        local v = vehicles[i]
         local primPart = v.PrimaryPart
         if not primPart then continue end
         local dist = (primPart.Position - char.HumanoidRootPart.Position).Magnitude

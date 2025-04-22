@@ -5,9 +5,13 @@ local LastStuff = {
 	RR = {},
 }
 
-local carProps = require(game.ReplicatedStorage:WaitForChild("VehiclePropertiesList"))
-local VehiclePhysics = require(game.ReplicatedStorage:WaitForChild("VehiclePhysics"))
-local useState = require(game.ReplicatedStorage.Modules:WaitForChild("useState")) -- Require your module
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Modules = ReplicatedStorage:WaitForChild("Modules")
+local VehicleModules = Modules:WaitForChild("Vehicle")
+
+local carProps = require(VehicleModules:WaitForChild("VehiclePropertiesList"))
+local VehiclePhysics = require(VehicleModules:WaitForChild("VehiclePhysics"))
+local useState = require(Modules:WaitForChild("useState")) -- Require your module
 
 local VehicleFolder = workspace.Vehicles
 local AllCarsMemory = {}
@@ -44,7 +48,7 @@ local function AddCar(obj, _cprops) -- Mark cprops as unused
 
 	-- Set up wheel memory
 	for wheelName, _ in pairs(carProps.getWheelPositions(obj)) do
-		AllCarsMemory[obj].SpringLengthMemory[wheelName] = 1.2
+		AllCarsMemory[obj].SpringLengthMemory[wheelName] = 1.5
 	end
 
 	-- Handle seat occupancy changes
@@ -86,17 +90,12 @@ local function AddCar(obj, _cprops) -- Mark cprops as unused
 		weld.Part0 = obj.PrimaryPart
 		weld.Part1 = ClonedWheel.PrimaryPart
 		weld.C0 = CFrame.new(carProps.getWheelPositions(obj)[i])
-		if v.x > 0 then
+		if v.x > driverSeat.Position.X then
 			weld.C0 = weld.C0 * CFrame.Angles(0, 0, 0)
-		end
-		if v.x < 0 then
+		else
 			weld.C0 = weld.C0 * CFrame.Angles(0, math.rad(180), 0)
 		end
 	end
-end
-
-for _,object in pairs(VehicleFolder:GetChildren())do
-	AddCar(object)
 end
 
 -- Add listener for cars added after initialization
@@ -141,21 +140,11 @@ local function SpawnCar(carName)
     return clonedCar
 end
 
-for _, v in pairs(game.ReplicatedFirst.Vehicles:GetChildren()) do
-	SpawnCar(v.Name)
-end
-
 
 local WhatPlayerCarTab = {}
 game.Players.PlayerAdded:Connect(function(p)
 
 	local isP = p.MembershipType == Enum.MembershipType.Premium
-	p.CharacterAdded:Connect(function(c)
-
-		local nc = SpawnCar("Obey-Drifter")
-		nc:SetAttribute("owner",p.Name)
-		WhatPlayerCarTab[p] = nc
-	end)
 
 	p.CharacterRemoving:Connect(function(c)
 
@@ -163,14 +152,6 @@ game.Players.PlayerAdded:Connect(function(p)
 			WhatPlayerCarTab[p]:Destroy()
 		end
 	end)
-
-	if isP or game["Run Service"]:IsStudio() then
-
-		wait(1)
-	else
-
-		wait(10)
-	end
 end)
 
 local function getAllLightTypesInside(parent: Instance): {Light}
@@ -262,7 +243,11 @@ end)
 
 SpawnPlayerCarEvent.OnServerEvent:Connect(function(player)
 	if PlayerCars[player] and PlayerCars[player].Parent then
-		return -- Already has a car
+		-- remove the old car
+
+		PlayerCars[player]:Destroy()
+		PlayerCars[player] = nil
+
 	end
 	-- Get all available car names from carProps (only those with a 'model' property)
 	local carNames = {}
@@ -285,11 +270,11 @@ SpawnPlayerCarEvent.OnServerEvent:Connect(function(player)
 end)
 
 local RunService = game:GetService("RunService")
-local PHYSICS_WAKE_INTERVAL = 2 -- seconds
+local PHYSICS_WAKE_INTERVAL = 0.4 -- seconds
 
 local lastWakeNudge = {}
 
-local REST_STATIC_VEL = 1 -- below this velocity is considered nearly static
+local REST_STATIC_VEL = 2 -- below this velocity is considered nearly static
 local REST_STATIC_SUSP = 1 -- below this suspension delta is considered nearly static
 local REST_TIME = 3 -- seconds to enter resting state
 local carRestTimers = {}
@@ -300,12 +285,12 @@ RunService.Heartbeat:Connect(function(delta)
     local success, err = pcall(function()
         for _, carModel in pairs(ExistingCarsTable) do
             if not carModel or not carModel.Parent then
-                print("[DEBUG] Skipping carModel: missing or not in workspace", carModel)
+                --print("[DEBUG] Skipping carModel: missing or not in workspace", carModel)
                 continue
             end
             local carPrim = carModel.PrimaryPart or carModel:FindFirstChild("Main Part")
             if not carPrim then
-                print("[DEBUG] Skipping carModel: missing PrimaryPart", carModel)
+                --print("[DEBUG] Skipping carModel: missing PrimaryPart", carModel)
                 continue
             end
 
@@ -352,7 +337,7 @@ RunService.Heartbeat:Connect(function(delta)
             local isNetworkOwned = carPrim:GetNetworkOwner() ~= nil
 
             -- Only process physics if server owns the car
-            if not isNetworkOwned and not carIsResting[carModel] then
+            if not isNetworkOwned then -- and not carIsResting[carModel]
                 local id = carModel:GetAttribute("id")
                 local props = carProps[id]
                 local inputStates = VehicleInputStates[carModel]
@@ -407,23 +392,13 @@ RunService.Heartbeat:Connect(function(delta)
                         end
 
                         weld.C0 = weldInitPos
-                        if basePos.x > 0 then
-                            weld.C0 = weld.C0 * CFrame.Angles(0,0,0)
-                            weld.C0 = weld.C0 * CFrame.Angles(-state.wheelRotation,0,0)
-                        else
-                            weld.C0 = weld.C0 * CFrame.Angles(state.wheelRotation,0,0)
-                            weld.C0 = weld.C0 * CFrame.Angles(0, math.rad(180), 0)
-                        end
-                        -- Debug: Raycast check
-                        local rayOrigin = carPrim.CFrame:ToWorldSpace(CFrame.new(basePos)).p
-                        local rayLength = (props.SuspensionMaxLength or 1.5) + (props.wheelRadius or 1) + 2.0
-                        local rayDirection = -carPrim.CFrame.UpVector * rayLength
-                        local rayParams = RaycastParams.new()
-                        rayParams.FilterDescendantsInstances = {carModel}
-                        local raycast = workspace:Raycast(rayOrigin, rayDirection, rayParams)
-                        if not raycast then
-                            print("[DEBUG] Raycast miss for wheel", wheelName, "car", carModel.Name)
-                        end
+						if basePos.x > 0 then
+							weld.C0 = weld.C0 * CFrame.Angles(0,0,0)
+							weld.C0 = weld.C0 * CFrame.Angles(-state.wheelRotation,0,0)
+						else
+							weld.C0 = weld.C0 * CFrame.Angles(state.wheelRotation,0,0)
+							weld.C0 = weld.C0 * CFrame.Angles(0, math.rad(180), 0)
+						end
                     end
                 end
             end
