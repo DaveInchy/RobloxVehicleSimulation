@@ -42,37 +42,91 @@ local ownershipConnection = nil
 local steeringThread = nil
 
 -- Add per-wheel slip/skid state tracking
-local lastWheelSlipState = {} -- [wheelName] = {isSkidding = false, isSlipping = false}
-local lastWheelSkidState = {} -- [wheelName] = bool
+local _lastWheelSlipState = {} -- Prefix with _ since unused
+local _lastWheelSkidState = {} -- Prefix with _ since unused
 
 -- Add debounce for tire sounds and cooldown for car entry
-local slipTimers = {} -- [wheelName] = {skid = 0, slip = 0}
+local _slipTimers = {} -- Prefix with _ since unused
 local lastCarEntryTime = 0
 local CAR_ENTRY_COOLDOWN = 0.5
-local SLIP_DEBOUNCE = 0.12 -- seconds slip/skid must persist before sound
+local _SLIP_DEBOUNCE = 0.12 -- Prefix with _ since unused
+
+-- Define missing DEFAULT_PHYSICS_CONSTRAINTS
+local DEFAULT_PHYSICS_CONSTRAINTS = {
+    MAX_SUSPENSION_FORCE = 2500,
+    MIN_SUSPENSION_LENGTH = 2,
+    MAX_LATERAL_FORCE = 1500,
+    MAX_TRACTION_FORCE = 2000,
+    STEERING_DAMPING = 5.0,
+    STATIC_FRICTION_THRESHOLD = 1,
+    WEIGHT_TO_FRICTION_MULT = 0.1,
+    STATIC_FRICTION_COEFFICIENT = 5.0,
+    PARKING_BRAKE_FORCE = 1000
+}
+
+-- Utility: get the main part of a wheel (handles Model, Part, or nested Model)
+local function getWheelPart(wheel)
+    if not wheel then return nil end
+    if wheel:IsA("BasePart") then return wheel end
+    if wheel:IsA("Model") then
+        return wheel:FindFirstChild("Wheel") or
+               wheel:FindFirstChildWhichIsA("BasePart") or
+               wheel.PrimaryPart
+    end
+    return nil
+end
+
+local function getWheelMotor(wheelName, carModel)
+    local chassisParts = carModel.Chassis:GetDescendants()
+    for i, v in ipairs(chassisParts) do
+        if v:IsA("Motor6D") then
+            -- match the wheelName and motorname
+            if v.Name == wheelName .. "_Wheel_Motor" or v.Name == wheelName .. "_Motor"  then
+                return v
+            end
+        end
+    end
+    return nil
+end
 
 -- Create a separate function for visual updates that can run regardless of network ownership
 local function updateWheelVisuals(carModel, wheelStates, physicsState)
     if not wheelStates then return end
 
     for wheelName, state in pairs(wheelStates) do
-        local wheel = carModel.Wheels:FindFirstChild(wheelName)
-        if wheel and wheel:FindFirstChild("Weld") then
-            local weld = wheel.Weld
-            local basePos = carProps.getWheelPositions(carModel)[wheelName]
+        local chassis = carModel:FindFirstChild("Chassis")
+        local attach = chassis and chassis:FindFirstChild(wheelName .. "_Wheel")
+        local wheel = attach and (attach:FindFirstChild("Wheel") or attach:FindFirstChild("Part") or attach:FindFirstChild("Model"))
+        if wheel then
+            local wheelPart = getWheelPart(wheel)
+            if wheelPart then
+                local motor = VehiclePhysics.getWheelMotor(wheelName, carModel)
 
-            local weldInitPos = CFrame.new(basePos - Vector3.new(0, state.springLength, 0))
-            if string.sub(wheelName,1,1)=='F' then
-                weldInitPos = weldInitPos * CFrame.Angles(0, -math.rad(physicsState.steeringAngle), 0)
-            end
+                if motor and motor:IsA("Motor6D") then
+                    -- Get base position and spring length from physics state
+                    local basePos = attach.Position
 
-            weld.C0 = weldInitPos
-            if basePos.x > 0 then
-                weld.C0 = weld.C0 * CFrame.Angles(0,0,0)
-                weld.C0 = weld.C0 * CFrame.Angles(-state.wheelRotation,0,0)
-            else
-                weld.C0 = weld.C0 * CFrame.Angles(state.wheelRotation,0,0)
-                weld.C0 = weld.C0 * CFrame.Angles(0, math.rad(180), 0)
+                    -- Create initial position -- DONT OFFSET THIS IN BOTH THE LOOP AND THE UPDATE FUNCTION
+                    local weldInitPos = CFrame.new(basePos) - Vector3.new(0, wheelPart.Size.Y/2, 0)
+
+
+                    -- Apply steering for front wheels
+                    if string.sub(wheelName,1,1)=='F' then
+                        weldInitPos = weldInitPos * CFrame.Angles(0, -math.rad(physicsState.steeringAngle), 0)
+                    end
+
+                    -- Apply wheel rotation based on side (left/right)
+                    motor.C0 = weldInitPos
+                    local wheelRotation = if basePos.X > 0
+                        then -state.wheelRotation
+                        else state.wheelRotation
+
+                    if basePos.X > 0 then
+                        motor.C0 = motor.C0 * CFrame.Angles(wheelRotation, 0, 0) * CFrame.Angles(0, math.rad(180), 0)
+                    else
+                        motor.C0 = motor.C0 * CFrame.Angles(wheelRotation, 0, 0)
+                    end
+                end
             end
         end
     end
@@ -108,30 +162,35 @@ local function startSteeringUpdateLoop(seatPart, carModel, props, activeVehicleS
 
                 -- Update wheel visuals for steering
                 for wheelName, _ in pairs(carProps.getWheelPositions(carModel)) do
-                    local wheel = carModel.Wheels:FindFirstChild(wheelName)
-                    if wheel and wheel:FindFirstChild("Weld") and string.sub(wheelName,1,1)=='F' then
-                        local weld = wheel.Weld
-                        local basePos = carProps.getWheelPositions(carModel)[wheelName]
+                    local chassis = carModel:FindFirstChild("Chassis")
+                    local attach = chassis and chassis:FindFirstChild(wheelName .. "_Wheel")
+                    local wheel = attach and (attach:FindFirstChild("Wheel") or attach:FindFirstChild("Part") or attach:FindFirstChild("Model"))
+                    local wheelPart = getWheelPart(wheel)
+                    if wheelPart and string.sub(wheelName,1,1)=='F' then
+                        local motor = getWheelMotor(wheelName, carModel)
+                        if motor and motor:IsA("Motor6D") then
+                            local basePos = carProps.getWheelPositions(carModel)[wheelName]
 
-                        -- Get current spring length from physics state or use max
-                        local springLength = activeVehicleStateRef.springLengthMemory[wheelName]
-                            or props.SuspensionMaxLength
+                            -- Get current spring length from physics state or use max
+                            local springLength = activeVehicleStateRef.springLengthMemory[wheelName]
+                                or props.SuspensionMaxLength
 
-                        local weldInitPos = CFrame.new(basePos - Vector3.new(0, springLength, 0))
-                        weldInitPos = weldInitPos * CFrame.Angles(0, -math.rad(activeVehicleStateRef.steeringAngle), 0)
+                            local weldInitPos = CFrame.new(basePos) + Vector3.new(0,springLength,0) - Vector3.new(0, wheelPart.Size.Y / 2, 0)
+                            weldInitPos = weldInitPos * CFrame.Angles(0, -math.rad(activeVehicleStateRef.steeringAngle), 0)
 
-                        -- Preserve wheel rotation but update steering
-                        local currentRotation = if basePos.x > 0
-                            then -activeVehicleStateRef.wheelRotations[wheelName]
-                            else activeVehicleStateRef.wheelRotations[wheelName]
+                            -- Preserve wheel rotation but update steering
+                            local currentRotation = if basePos.x > 0
+                                then -activeVehicleStateRef.wheelRotations[wheelName]
+                                else activeVehicleStateRef.wheelRotations[wheelName]
 
-                        weld.C0 = weldInitPos
-                        if basePos.x > 0 then
-                            weld.C0 = weld.C0 * CFrame.Angles(0,0,0)
-                            weld.C0 = weld.C0 * CFrame.Angles(currentRotation,0,0)
-                        else
-                            weld.C0 = weld.C0 * CFrame.Angles(currentRotation,0,0)
-                            weld.C0 = weld.C0 * CFrame.Angles(0, math.rad(180), 0)
+                            motor.C0 = weldInitPos
+                            if basePos.x > 0 then
+                                motor.C0 = motor.C0 * CFrame.Angles(0,0,0)
+                                motor.C0 = motor.C0 * CFrame.Angles(currentRotation,0,0)
+                            else
+                                motor.C0 = motor.C0 * CFrame.Angles(currentRotation,0,0)
+                                motor.C0 = motor.C0 * CFrame.Angles(0, math.rad(180), 0)
+                            end
                         end
                     end
                 end
@@ -228,12 +287,13 @@ humanoid.Seated:Connect(function(isSeated, seat)
     if isSeated and seat then
         if seat:IsA("VehicleSeat") and seat:FindFirstAncestor('Vehicles') then
             carModel = seat.Parent
-            local carPrim = carModel.PrimaryPart
-            if not carPrim then return end
-            -- Removed GetNetworkOwner() call (server-only API)
+            local chassis = carModel:FindFirstChild("Chassis")
+            if not chassis then return end
+
             print("[DEBUG] LocalPlayer is:", tostring(player))
             local id = carModel:GetAttribute("id")
             local props = carProps[id]
+
             -- Immediately start physics and input as soon as seated
             activeVehicleState = VehiclePhysics.createPhysicsState()
             vehicleInputStates = {
@@ -281,12 +341,13 @@ humanoid.Seated:Connect(function(isSeated, seat)
 
             simRoutine = RunService.Stepped:Connect(function(delta: number)
                 if humanoid.Sit and seat:IsDescendantOf(workspace) then
-                    local currentCarPrim = carModel.PrimaryPart
-                    if not currentCarPrim then return end
+                    local currentChassis = carModel:FindFirstChild("Chassis")
+                    if not currentChassis then return end
+
                     local currentThrottle, currentSteer = getVehicleInputs(seat)
                     local currentBraking = isBraking
                     local currentBoosting = isBoosting
-                    local currentSpeed = currentCarPrim.AssemblyLinearVelocity.Magnitude
+                    local currentSpeed = currentChassis.AssemblyLinearVelocity.Magnitude
 
                     if vehicleInputStates then
                         vehicleInputStates.Throttle:set(currentThrottle)
@@ -308,120 +369,125 @@ humanoid.Seated:Connect(function(isSeated, seat)
                     -- Trigger Vehicle Effects based on wheelStates and vehicle state
                     if activeVehicleEffects and wheelStates then
                         for wheelName, state in pairs(wheelStates) do
-                            local wheelPart = carModel.Wheels:FindFirstChild(wheelName)
-                            if wheelPart and wheelPart.PrimaryPart then
-                                local wheelPrimary = wheelPart.PrimaryPart
-                                local isDoingBurnout = false
-                                local isDoingSkid = false
+                            -- Find the wheel under the correct attachment in Chassis
+                            local wheelChassis = carModel:FindFirstChild("Chassis") -- Renamed from chassis to avoid shadowing
+                            local attach = wheelChassis and wheelChassis:FindFirstChild(wheelName .. "_Wheel")
+                            local wheel = attach and (attach:FindFirstChild("Wheel") or attach:FindFirstChild("Part") or attach:FindFirstChild("Model"))
+                            if wheel then
+                                local wheelPart = getWheelPart(wheel)
+                                if wheelPart then
+                                    local isDoingBurnout = false
+                                    local isDoingSkid = false
 
-                                -- Burnout Check (High throttle, high longitudinal slip, low speed, on ground)
-                                if currentThrottle > 1 and state.isSlipping and currentSpeed < 15 and state.onGround then -- @EDIT 1
-                                    isDoingBurnout = true
-                                    if not activeBurnoutEffects[wheelName] then
-                                        activeBurnoutEffects[wheelName] = activeVehicleEffects:PlayBurnoutEffect(carModel, wheelPart)
+                                    -- Burnout Check (High throttle, high longitudinal slip, low speed, on ground)
+                                    if currentThrottle > 1 and state.isSlipping and currentSpeed < 15 and state.onGround then
+                                        isDoingBurnout = true
+                                        if not activeBurnoutEffects[wheelName] then
+                                            activeBurnoutEffects[wheelName] = activeVehicleEffects:PlayBurnoutEffect(carModel, wheelPart)
+                                        end
                                     end
-                                end
-                                if not isDoingBurnout and activeBurnoutEffects[wheelName] then
-                                    activeVehicleEffects:StopBurnoutEffect(activeBurnoutEffects[wheelName])
-                                    activeBurnoutEffects[wheelName] = nil
-                                end
+                                    if not isDoingBurnout and activeBurnoutEffects[wheelName] then
+                                        activeVehicleEffects:StopBurnoutEffect(activeBurnoutEffects[wheelName])
+                                        activeBurnoutEffects[wheelName] = nil
+                                    end
 
-                                -- Manage Skid Trail
-                                if not isDoingBurnout then
-                                    if state.isSkidding and state.onGround and currentSpeed > 20 and math.abs(state.lateralSlipRatio) > 0.8 then
+                                    -- Manage Skid Trail
+                                    if not isDoingBurnout then
+                                        if state.isSkidding and state.onGround and currentSpeed > 20 and math.abs(state.lateralSlipRatio) > 0.8 then
 
-                                        isDoingSkid = true
-                                        local skidDirection = currentCarPrim.CFrame.RightVector * math.sign(state.lateralVelocityX)
-                                        local contactPoint = wheelPrimary.Position - Vector3.new(0, wheelPrimary.Size.Y / 2, 0)
+                                            isDoingSkid = true
+                                            local skidDirection = currentChassis.CFrame.RightVector * math.sign(state.lateralVelocityX)
+                                            local contactPoint = wheelPart.Position - Vector3.new(0, wheelPart.Size.Y / 2, 0)
 
-                                        if not activeSkidTrails[wheelName] then
-                                            -- Create Attachments
-                                            local att0 = Instance.new("Attachment")
-                                            att0.Name = wheelName .. "_SkidAtt0"
-                                            att0.Parent = workspace.Terrain
-                                            att0.WorldPosition = contactPoint
+                                            if not activeSkidTrails[wheelName] then
+                                                -- Create Attachments
+                                                local att0 = Instance.new("Attachment")
+                                                att0.Name = wheelName .. "_SkidAtt0"
+                                                att0.Parent = workspace.Terrain
+                                                att0.WorldPosition = contactPoint
 
-                                            local att1 = Instance.new("Attachment")
-                                            att1.Name = wheelName .. "_SkidAtt1"
-                                            att1.Parent = workspace.Terrain
-                                            att1.WorldPosition = contactPoint - skidDirection * 0.1 -- Start slightly behind
+                                                local att1 = Instance.new("Attachment")
+                                                att1.Name = wheelName .. "_SkidAtt1"
+                                                att1.Parent = workspace.Terrain
+                                                att1.WorldPosition = contactPoint - skidDirection * 0.1 -- Start slightly behind
 
-                                            -- Create Trail
-                                            local trail = activeVehicleEffects:createEffect("TireMarkTrail", workspace.Terrain, att0, att1)
-                                            if trail then
-                                                trail.Enabled = true
-                                                activeSkidTrails[wheelName] = { trail = trail, attachment0 = att0, attachment1 = att1 }
-                                                activeVehicleEffects:PlaySkidEffect(carModel, wheelPart, skidDirection)
+                                                -- Create Trail
+                                                local trail = activeVehicleEffects:createEffect("TireMarkTrail", workspace.Terrain, att0, att1)
+                                                if trail then
+                                                    trail.Enabled = true
+                                                    activeSkidTrails[wheelName] = { trail = trail, attachment0 = att0, attachment1 = att1 }
+                                                    activeVehicleEffects:PlaySkidEffect(carModel, wheelPart, skidDirection)
+                                                else
+                                                    att0:Destroy()
+                                                    att1:Destroy()
+                                                end
                                             else
-                                                att0:Destroy()
-                                                att1:Destroy()
-                                            end
-                                        else
-                                            -- Update existing attachments
-                                            local handles = activeSkidTrails[wheelName]
-                                            handles.attachment0.WorldPosition = contactPoint
-                                            handles.attachment1.WorldPosition = contactPoint - skidDirection * 0.1
-                                            -- Ensure trail is enabled if it was somehow disabled
-                                            if not handles.trail.Enabled then
-                                                handles.trail.Enabled = true
+                                                -- Update existing attachments
+                                                local handles = activeSkidTrails[wheelName]
+                                                handles.attachment0.WorldPosition = contactPoint
+                                                handles.attachment1.WorldPosition = contactPoint - skidDirection * 0.1
+                                                -- Ensure trail is enabled if it was somehow disabled
+                                                if not handles.trail.Enabled then
+                                                    handles.trail.Enabled = true
+                                                end
                                             end
                                         end
                                     end
-                                end
 
-                                -- Stop Skid Trail if conditions are no longer met
-                                if not isDoingSkid and activeSkidTrails[wheelName] then
-                                    local handles = activeSkidTrails[wheelName]
+                                    -- Stop Skid Trail if conditions are no longer met
+                                    if not isDoingSkid and activeSkidTrails[wheelName] then
+                                        local handles = activeSkidTrails[wheelName]
 
-                                    print("[DEBUG] Skid END for wheel:", wheelName)
-                                    activeVehicleEffects:StopSkidSound(carModel, wheelPart)
+                                        print("[DEBUG] Skid END for wheel:", wheelName)
+                                        activeVehicleEffects:StopSkidSound(carModel, wheelPart)
 
-                                    if handles.trail then
-                                        handles.trail.Enabled = false
-                                    end
-                                    -- Disable first
-                                    -- Use Debris to clean up after trail fades
-                                    if handles.trail then
-                                        Debris:AddItem(handles.trail, handles.trail.Lifetime + 0.5)
-                                    end
-                                    if handles.attachment0 then
-                                        Debris:AddItem(handles.attachment0, handles.trail.Lifetime + 0.5)
-                                    end
-                                    if handles.attachment1 then
-                                        Debris:AddItem(handles.attachment1, handles.trail.Lifetime + 0.5)
-                                    end
-                                    activeSkidTrails[wheelName] = nil
-                                end
-
-                                -- Play other effects only if not doing a burnout or skid
-                                if not isDoingBurnout and not isDoingSkid then
-                                    -- Skidding Effect (Lateral Slip
-
-                                    local lateralSpeed = math.abs(state.lateralVelocityX);
-                                    local forwardSpeed = carPrim.AssemblyLinearVelocity.Magnitude;
-
-                                    if (state.isSkidding and state.onGround) and (forwardSpeed > 20
-                                        and math.abs(state.lateralSlipRatio) > 0.8) then
-                                        print("[DEBUG] Skid START for wheel:", wheelName)
-                                        activeVehicleEffects:PlaySkidSound(carModel, wheelPart)
-                                        isDoingSkid = true
-                                        -- Calculate skid direction (vehicle's right vector, scaled by lateral velocity direction)
-                                        local skidDirection = currentCarPrim.CFrame.RightVector * math.sign(state.lateralVelocityX)
-                                        activeVehicleEffects:PlaySkidEffect(carModel, wheelPart, skidDirection)
-                                    end
-
-                                    --[[-- Slipping Effect (Longitudinal Slip - e.g., braking lockup or moderate acceleration slip)
-                                    -- Only play if not skidding (to avoid overlapping sounds/effects)
-                                    if not isDoingSkid and state.isSlipping and state.onGround and currentSpeed > 5 then
-                                        activeVehicleEffects:PlaySlipEffect(carModel, wheelPart)
-                                    end]]
-
-                                    -- Gravel/Surface Effect
-                                    if state.onGround and currentSpeed > 20 then -- Only play if moving
-                                        if state.surfaceMaterial == Enum.Material.Ground or state.surfaceMaterial == Enum.Material.Sand or state.surfaceMaterial == Enum.Material.Mud then
-                                            activeVehicleEffects:PlayGravelEffect(carModel, wheelPart)
+                                        if handles.trail then
+                                            handles.trail.Enabled = false
                                         end
-                                        -- TODO: Add checks for other surface types if needed
+                                        -- Disable first
+                                        -- Use Debris to clean up after trail fades
+                                        if handles.trail then
+                                            Debris:AddItem(handles.trail, handles.trail.Lifetime + 0.5)
+                                        end
+                                        if handles.attachment0 then
+                                            Debris:AddItem(handles.attachment0, handles.trail.Lifetime + 0.5)
+                                        end
+                                        if handles.attachment1 then
+                                            Debris:AddItem(handles.attachment1, handles.trail.Lifetime + 0.5)
+                                        end
+                                        activeSkidTrails[wheelName] = nil
+                                    end
+
+                                    -- Play other effects only if not doing a burnout or skid
+                                    if not isDoingBurnout and not isDoingSkid then
+                                        -- Skidding Effect (Lateral Slip
+
+                                        local _lateralSpeed = math.abs(state.lateralVelocityX) -- Prefix with _ since unused
+                                        local forwardSpeed = currentChassis.AssemblyLinearVelocity.Magnitude
+
+                                        if (state.isSkidding and state.onGround) and (forwardSpeed > 20
+                                            and math.abs(state.lateralSlipRatio) > 0.8) then
+                                            print("[DEBUG] Skid START for wheel:", wheelName)
+                                            activeVehicleEffects:PlaySkidSound(carModel, wheelPart)
+                                            isDoingSkid = true
+                                            -- Calculate skid direction (vehicle's right vector, scaled by lateral velocity direction)
+                                            local skidDirection = currentChassis.CFrame.RightVector * math.sign(state.lateralVelocityX)
+                                            activeVehicleEffects:PlaySkidEffect(carModel, wheelPart, skidDirection)
+                                        end
+
+                                        --[[-- Slipping Effect (Longitudinal Slip - e.g., braking lockup or moderate acceleration slip)
+                                        -- Only play if not skidding (to avoid overlapping sounds/effects)
+                                        if not isDoingSkid and state.isSlipping and state.onGround and currentSpeed > 5 then
+                                            activeVehicleEffects:PlaySlipEffect(carModel, wheelPart)
+                                        end]]
+
+                                        -- Gravel/Surface Effect
+                                        if state.onGround and currentSpeed > 20 then -- Only play if moving
+                                            if state.surfaceMaterial == Enum.Material.Ground or state.surfaceMaterial == Enum.Material.Sand or state.surfaceMaterial == Enum.Material.Mud then
+                                                activeVehicleEffects:PlayGravelEffect(carModel, wheelPart)
+                                            end
+                                            -- TODO: Add checks for other surface types if needed
+                                        end
                                     end
                                 end
                             end
@@ -469,9 +535,9 @@ ContextActionService:BindAction("EnterVehicle", function(_, inputState)
     local vehicles = workspace.Vehicles:GetChildren()
     for i = 1, #vehicles do
         local v = vehicles[i]
-        local primPart = v.PrimaryPart
-        if not primPart then continue end
-        local dist = (primPart.Position - char.HumanoidRootPart.Position).Magnitude
+        local chassis = v:FindFirstChild("Chassis")
+        if not chassis then continue end
+        local dist = (chassis.Position - char.HumanoidRootPart.Position).Magnitude
         if dist < nearestdist then
             nearestcar = v
             nearestdist = dist
@@ -503,7 +569,8 @@ ContextActionService:BindAction("EnterVehicle", function(_, inputState)
                         C0 = oldC0
                     }):Play()
                     task.wait(0.2)
-                    local hinge = nearestcar.PrimaryPart:FindFirstChild(nearestseat.Name)
+                    local chassis = nearestcar:FindFirstChild("Chassis")
+                    local hinge = chassis and chassis:FindFirstChild(nearestseat.Name)
                     if hinge and hinge:IsA("HingeConstraint") then
                         hinge.TargetAngle = 0
                     end

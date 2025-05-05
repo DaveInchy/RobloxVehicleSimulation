@@ -20,21 +20,21 @@ Features to implement:
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
-local TweenService = game:GetService("TweenService") -- Added for potential smooth transitions
+local _TweenService = game:GetService("TweenService")
 
-local VehicleCamera = {} -- Renamed from DrivingCamera
-VehicleCamera.__index = VehicleCamera -- Renamed from DrivingCamera
+local VehicleCamera = {}
+VehicleCamera.__index = VehicleCamera
 
 local currentCamera = workspace.CurrentCamera
 local player = Players.LocalPlayer
 
 local attachedVehicle = nil
-local baseCameraOffset = Vector3.new(0, 8, 20) -- Base offset (Y increased by 5)
-local cameraOffset = baseCameraOffset -- Current offset, can be modified by rotation/shake
-local cameraTargetOffset = Vector3.new(0, 2, 0) -- Point slightly above the vehicle base
-local cameraSmoothingFactor = 7 -- Adjusted for exponential smoothing (higher = tighter camera)
-local isReversing = false -- Track if vehicle is reversing
-local cameraCollisionBuffer = 0.5 -- Minimum distance between camera and obstruction
+local baseCameraOffset = Vector3.new(0, 8, 20)
+local _cameraOffset = baseCameraOffset
+local cameraTargetOffset = Vector3.new(0, 2, 0)
+local cameraSmoothingFactor = 7
+local isReversing = false
+local cameraCollisionBuffer = 0.5
 
 -- Zooming Variables
 local currentZoomMultiplier = 1.0
@@ -47,25 +47,25 @@ local isOrbiting = false
 local orbitYaw = 0
 local orbitPitch = 0
 local orbitSensitivity = 0.005
-local orbitReturnSmoothing = 5 -- How fast orbit returns to default when RMB released
+local orbitReturnSmoothing = 5
 
 -- Camera Shake Variables
 local shakeIntensity = 0
-local shakeFrequency = 10
-local shakeAmplitude = 0.5
-local shakeDampening = 5
+local shakeFrequency = 5 -- Reduced from 10 for smoother shake
+local shakeAmplitude = 0.25 -- Reduced from 0.5 for less dramatic shake
+local shakeDampening = 8 -- Increased from 5 for faster shake recovery
 local shakeSeed = Random.new()
 
 -- Collision Raycast Variables
-local lastDownHitDistance = nil
-local lastForwardHitTime = 0
-local forwardHitCooldown = 0.2 -- Cooldown in seconds to prevent constant shaking against walls
-local downRayLength = 5 -- How far down to check from chassis center
-local forwardRayLength = 3 -- How far forward to check
-local collisionShakeMultiplier = 1.5 -- Make collision shakes more intense
+local _lastDownHitDistance = nil
+local _lastForwardHitTime = 0
+local _forwardHitCooldown = 0.2
+local _downRayLength = 5
+local _forwardRayLength = 3
+local _collisionShakeMultiplier = 1.5
 
 local connection = nil
-local inputConnections = {} -- Store input connections for cleanup
+local inputConnections = {}
 
 -- Function to handle camera shake
 local function applyCameraShake(dt)
@@ -87,152 +87,96 @@ function VehicleCamera:TriggerShake(intensity) -- Renamed from DrivingCamera
 	shakeIntensity = math.max(shakeIntensity, intensity) -- Don't override if a stronger shake is active
 end
 
--- Function to update camera position and orientation
+-- Move updateCamera function definition before it's used in AttachToVehicle
 local function updateCamera(dt)
-	if not attachedVehicle or not attachedVehicle:IsDescendantOf(workspace) then
-		return
-	end
+    if not attachedVehicle then return end
+    local chassis = attachedVehicle:FindFirstChild("Chassis")
+    if not chassis then
+        warn("VehicleCamera: Cannot update camera, vehicle has no Chassis!")
+        return
+    end
 
-	local vehicleRoot = attachedVehicle.PrimaryPart
-	if not vehicleRoot then
-		warn("DrivingCamera: Attached vehicle has no PrimaryPart!")
-		return
-	end
+    -- Update camera based on chassis
+    local vehicleCF = chassis.CFrame
+    local vehicleVel = chassis.AssemblyLinearVelocity
+    local speed = vehicleVel.Magnitude
 
-	local vehicleCFrame = vehicleRoot.CFrame
-	local vehicleVelocity = vehicleRoot.AssemblyLinearVelocity
-	local speed = vehicleVelocity.Magnitude
+    -- Determine if reversing
+    local forwardVector = vehicleCF.LookVector
+    local velocityDirection = vehicleVel.Magnitude > 0.1 and vehicleVel.Unit or Vector3.zero
+    local dotProduct = forwardVector:Dot(velocityDirection)
+    isReversing = dotProduct < -0.1 -- Threshold to consider it reversing
 
-	-- Determine if reversing
-	local forwardVector = vehicleCFrame.LookVector
-	local velocityDirection = vehicleVelocity.Magnitude > 0.1 and vehicleVelocity.Unit or Vector3.zero
-	local dotProduct = forwardVector:Dot(velocityDirection)
-	isReversing = dotProduct < -0.1 -- Threshold to consider it reversing
+    -- Smoothly return orbit angles if not orbiting
+    if not isOrbiting then
+        local orbitReturnAlpha = 1 - math.exp(-orbitReturnSmoothing * dt)
+        orbitYaw = orbitYaw * (1 - orbitReturnAlpha)
+        orbitPitch = orbitPitch * (1 - orbitReturnAlpha)
 
-	-- Smoothly return orbit angles if not orbiting
-	if not isOrbiting then
-		local orbitReturnAlpha = 1 - math.exp(-orbitReturnSmoothing * dt)
-		orbitYaw = orbitYaw * (1 - orbitReturnAlpha)
-		orbitPitch = orbitPitch * (1 - orbitReturnAlpha)
-		-- Snap to zero if very close to avoid infinite lerp
-		if math.abs(orbitYaw) < 0.001 then orbitYaw = 0 end
-		if math.abs(orbitPitch) < 0.001 then orbitPitch = 0 end
-	end
+        if math.abs(orbitYaw) < 0.001 then
+            orbitYaw = 0
+        end
 
-	-- Calculate the base offset considering zoom
-	local zoomedOffset = Vector3.new(baseCameraOffset.X, baseCameraOffset.Y, baseCameraOffset.Z * currentZoomMultiplier)
+        if math.abs(orbitPitch) < 0.001 then
+            orbitPitch = 0
+        end
+    end
 
-	-- Apply orbit rotation
-	local orbitRotation = CFrame.Angles(0, orbitYaw, 0) * CFrame.Angles(orbitPitch, 0, 0)
-	local rotatedOffset = orbitRotation * zoomedOffset
+    -- Calculate the base offset considering zoom
+    local zoomedOffset = Vector3.new(baseCameraOffset.X, baseCameraOffset.Y, baseCameraOffset.Z * currentZoomMultiplier)
 
-	-- Adjust offset based on reversing state (apply AFTER orbit/zoom)
-	local actualOffset = rotatedOffset
-	if isReversing then
-		-- Keep camera looking forward relative to vehicle, but adjust offset Z
-		-- Note: Reversing logic might need refinement with orbiting enabled
-		actualOffset = Vector3.new(rotatedOffset.X, rotatedOffset.Y, -rotatedOffset.Z)
-	end
+    -- Apply orbit rotation
+    local orbitRotation = CFrame.Angles(0, orbitYaw, 0) * CFrame.Angles(orbitPitch, 0, 0)
+    local rotatedOffset = orbitRotation * zoomedOffset
 
-	local idealPosition = vehicleCFrame * (actualOffset + cameraTargetOffset)
-	local lookAtPosition = vehicleCFrame * cameraTargetOffset
+    -- Adjust offset based on reversing state (apply AFTER orbit/zoom)
+    local actualOffset = rotatedOffset
+    if isReversing then
+        actualOffset = Vector3.new(rotatedOffset.X, rotatedOffset.Y, -rotatedOffset.Z)
+    end
 
-	-- Raycast to prevent clipping
-	local rayOrigin = lookAtPosition
-	local rayDirection = idealPosition - rayOrigin
-	local rayDistance = rayDirection.Magnitude
-	local finalPosition = idealPosition -- Start with the ideal position
+    local idealPosition = vehicleCF * (actualOffset + cameraTargetOffset)
+    local lookAtPosition = vehicleCF * cameraTargetOffset
 
-	if rayDistance > 0.1 then -- Only cast if there's a significant distance
-		rayDirection = rayDirection.Unit
-		local clipRayParams = RaycastParams.new()
-		clipRayParams.FilterDescendantsInstances = {attachedVehicle, player.Character or Instance.new("Model")} -- Exclude vehicle itself and player character
-		clipRayParams.FilterType = Enum.RaycastFilterType.Exclude
-		local clipRaycastResult = workspace:Raycast(rayOrigin, rayDirection * rayDistance, clipRayParams)
+    -- Raycast to prevent clipping
+    local rayOrigin = lookAtPosition
+    local rayDirection = idealPosition - rayOrigin
+    local rayDistance = rayDirection.Magnitude
+    local finalPosition = idealPosition -- Start with the ideal position
 
-		if clipRaycastResult then
-			-- Hit something, move camera closer
-			finalPosition = clipRaycastResult.Position - rayDirection * cameraCollisionBuffer
-			-- Optional: Draw debug ray
-			-- DebugDraw.drawRay(rayOrigin, clipRaycastResult.Position, Color3.new(1, 1, 0))
-		-- else
-			-- Optional: Draw debug ray
-			-- DebugDraw.drawRay(rayOrigin, idealPosition, Color3.new(0, 1, 1))
-		end
-	end
+    if rayDistance > 0.1 then -- Only cast if there's a significant distance
+        rayDirection = rayDirection.Unit
+        local clipRayParams = RaycastParams.new()
+        clipRayParams.FilterDescendantsInstances = {attachedVehicle, player.Character or Instance.new("Model")}
+        clipRayParams.FilterType = Enum.RaycastFilterType.Exclude
+        local clipRaycastResult = workspace:Raycast(rayOrigin, rayDirection * rayDistance, clipRayParams)
 
-	-- Smoothly interpolate camera position using frame-rate independent exponential smoothing
-	local currentCFrame = currentCamera.CFrame
-	-- Use finalPosition instead of idealPosition for the target CFrame
-	local targetCFrame = CFrame.lookAt(finalPosition, lookAtPosition)
-	local alpha = 1 - math.exp(-cameraSmoothingFactor * dt) -- Calculate alpha based on delta time
-	currentCamera.CFrame = currentCFrame:Lerp(targetCFrame, alpha)
+        if clipRaycastResult then
+            -- Hit something, move camera closer
+            finalPosition = clipRaycastResult.Position - rayDirection * cameraCollisionBuffer
+        end
+    end
 
-	-- --- Collision Detection Raycasts for Camera Shake ---
-	local shakeTriggerIntensity = 0
-	local rayParams = RaycastParams.new()
-	rayParams.FilterDescendantsInstances = {attachedVehicle}
-	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    -- Smoothly interpolate camera position using frame-rate independent exponential smoothing
+    local currentCFrame = currentCamera.CFrame
+    local targetCFrame = CFrame.lookAt(finalPosition, lookAtPosition)
+    local alpha = 1 - math.exp(-cameraSmoothingFactor * dt)
+    currentCamera.CFrame = currentCFrame:Lerp(targetCFrame, alpha)
 
-	-- 1. Downward Raycast (for bumps/landings)
-	local downRayOrigin = vehicleCFrame.Position
-	local downRayDirection = -vehicleCFrame.UpVector * downRayLength
-	local downRaycastResult = workspace:Raycast(downRayOrigin, downRayDirection, rayParams)
-	local currentDownDistance = downRayLength -- Assume max distance if no hit
-	if downRaycastResult then
-		currentDownDistance = (downRayOrigin - downRaycastResult.Position).Magnitude
-		-- Optional: Draw debug ray
-		-- DebugDraw.drawRay(downRayOrigin, downRaycastResult.Position, Color3.new(0, 1, 0))
-	-- else
-		-- Optional: Draw debug ray
-		-- DebugDraw.drawRay(downRayOrigin, downRayOrigin + downRayDirection, Color3.new(1, 0, 0))
-	end
+    -- Camera shake based on collisions and speed
+    local shakeTriggerIntensity = 0
 
-	if lastDownHitDistance then
-		local distanceDelta = currentDownDistance - lastDownHitDistance
-		-- Check for significant compression (negative delta) or sudden drop (large positive delta if previously grounded)
-		if math.abs(distanceDelta) > 0.5 and speed > 5 then -- Thresholds for delta and speed
-			local impactIntensity = math.abs(distanceDelta) * speed * 0.02 -- Scale shake with delta and speed
-			shakeTriggerIntensity = math.max(shakeTriggerIntensity, impactIntensity * collisionShakeMultiplier)
-			-- print("Down Ray Impact! Delta:", distanceDelta, "Speed:", speed, "Shake:", impactIntensity)
-		end
-	end
-	lastDownHitDistance = currentDownDistance
+    -- Speed-based shake (clamped to be less intense)
+    if speed > 50 then
+        shakeTriggerIntensity = math.clamp((speed - 50) / 800, 0, 0.25) -- Further reduced maximum shake and made it more gradual
+    end
 
-	-- 2. Forward Raycast (for front collisions)
-	local now = os.clock()
-	if now - lastForwardHitTime > forwardHitCooldown then
-		local forwardRayOrigin = vehicleCFrame * CFrame.new(0, 1, -vehicleRoot.Size.Z / 2) -- Origin slightly above center, at the front
-		local forwardRayDirection = vehicleCFrame.LookVector * forwardRayLength
-		local forwardRaycastResult = workspace:Raycast(forwardRayOrigin.Position, forwardRayDirection, rayParams)
+    if shakeTriggerIntensity > 0 then
+        VehicleCamera:TriggerShake(shakeTriggerIntensity)
+    end
 
-		if forwardRaycastResult then
-			local hitDistance = (forwardRayOrigin.Position - forwardRaycastResult.Position).Magnitude
-			if hitDistance < forwardRayLength * 0.8 and speed > 2 then -- Hit something close while moving
-				local impactIntensity = (forwardRayLength - hitDistance) * speed * 0.1 -- Scale with proximity and speed
-				shakeTriggerIntensity = math.max(shakeTriggerIntensity, impactIntensity * collisionShakeMultiplier * 1.5) -- Make front impacts stronger
-				lastForwardHitTime = now -- Apply cooldown
-				-- print("Forward Ray Impact! Dist:", hitDistance, "Speed:", speed, "Shake:", impactIntensity)
-				-- Optional: Draw debug ray
-				-- DebugDraw.drawRay(forwardRayOrigin.Position, forwardRaycastResult.Position, Color3.new(0, 0, 1))
-			end
-		-- else
-			-- Optional: Draw debug ray
-			-- DebugDraw.drawRay(forwardRayOrigin.Position, forwardRayOrigin.Position + forwardRayDirection, Color3.new(1, 0, 1))
-		end
-	end
-
-	-- Apply camera shake based on vehicle state (example: shake on high speed)
-	if speed > 50 then -- Example threshold for speed shake
-		shakeTriggerIntensity = math.max(shakeTriggerIntensity, (speed - 50) / 100)
-	end
-
-	-- Trigger combined shake intensity
-	if shakeTriggerIntensity > 0 then
-		VehicleCamera:TriggerShake(shakeTriggerIntensity) -- Renamed from DrivingCamera
-	end
-
-	applyCameraShake(dt)
+    -- Apply camera shake
+    applyCameraShake(dt)
 end
 
 -- Input Handlers
@@ -267,10 +211,11 @@ end
 
 -- Public methods
 function VehicleCamera:AttachToVehicle(vehicle) -- Renamed from DrivingCamera
-	if connection then
-		self:Detach() -- Detach from any previous vehicle
+	if not vehicle then return end
+	if not vehicle:FindFirstChild("Chassis") then
+		warn("VehicleCamera: Cannot attach to vehicle without a Chassis:", vehicle.Name)
+		return
 	end
-
 	attachedVehicle = vehicle
 	if not attachedVehicle.PrimaryPart then
 		warn("VehicleCamera: Cannot attach to vehicle without a PrimaryPart:", vehicle.Name) -- Renamed from DrivingCamera
@@ -300,33 +245,34 @@ function VehicleCamera:AttachToVehicle(vehicle) -- Renamed from DrivingCamera
 	inputConnections.InputEnded = UserInputService.InputEnded:Connect(handleInputEnded)
 	inputConnections.InputChanged = UserInputService.InputChanged:Connect(handleInputChanged)
 
-	lastDownHitDistance = nil -- Reset collision state on attach
-	lastForwardHitTime = 0
+	_lastDownHitDistance = nil -- Reset collision state on attach
+	_lastForwardHitTime = 0
 	print("VehicleCamera attached to:", vehicle.Name) -- Renamed from DrivingCamera
 end
 
-function VehicleCamera:Detach() -- Renamed from DrivingCamera
-	if connection then
-		connection:Disconnect()
-		connection = nil
-	end
-	attachedVehicle = nil
-	currentCamera.CameraType = Enum.CameraType.Custom -- Or restore previous type
-	currentCamera.CameraSubject = player.Character and player.Character:FindFirstChild("Humanoid") or nil
+function VehicleCamera:Detach()
+    if connection then
+        connection:Disconnect()
+        connection = nil
+    end
+    attachedVehicle = nil
+    currentCamera.CameraType = Enum.CameraType.Custom
+    currentCamera.CameraSubject = player.Character and player.Character:FindFirstChild("Humanoid") or nil
 
-	-- Disconnect Input Listeners
-	for _, connection in pairs(inputConnections) do
-		connection:Disconnect()
-	end
-	inputConnections = {}
-	if isOrbiting then -- Ensure mouse behavior is reset if detaching while orbiting
-		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-		isOrbiting = false
-	end
+    -- Fix connection shadowing by renaming the loop variable
+    for _, inputConnection in pairs(inputConnections) do
+        inputConnection:Disconnect()
+    end
+    inputConnections = {}
 
-	lastDownHitDistance = nil -- Reset collision state on detach
-	lastForwardHitTime = 0
-	print("VehicleCamera detached") -- Renamed from DrivingCamera
+    if isOrbiting then
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        isOrbiting = false
+    end
+
+    _lastDownHitDistance = nil
+    _lastForwardHitTime = 0
+    print("VehicleCamera detached")
 end
 
 -- Placeholder methods for settings

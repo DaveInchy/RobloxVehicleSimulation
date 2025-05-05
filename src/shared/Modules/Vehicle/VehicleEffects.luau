@@ -17,7 +17,7 @@ Features to implement:
 -- VehicleEffects:PlaySlipEffect(vehicle)
 ]=]
 
-local RunService = game:GetService("RunService")
+local _RunService = game:GetService("RunService")  -- Prefix with _ since unused
 local Debris = game:GetService("Debris")
 
 local VehicleEffects = {}
@@ -144,14 +144,30 @@ local effectProperties = {
 		-- Attachment1 = ..., -- Will be handled by controller
 		-- Parent = ..., -- Will be handled by controller
 	},
-	-- TireMarkDecal = { Texture = "rbxassetid://YOUR_TIRE_MARK_DECAL_ID" }
+	TireMarkDecal = {
+		Texture = "rbxassetid://16458623812",  -- Use tire mark texture
+		Color = ColorSequence.new(Color3.fromRGB(0, 0, 0)),
+		Transparency = 0.6
+	},
 }
 
+-- Move getWheelPart to top and use it consistently
+local function getWheelPart(wheel)
+    if not wheel then return nil end
+    if wheel:IsA("BasePart") then return wheel end
+    if wheel:IsA("Model") then
+        return wheel:FindFirstChild("Wheel") or
+               wheel:FindFirstChildWhichIsA("BasePart") or
+               wheel.PrimaryPart
+    end
+    return nil
+end
+
 function VehicleEffects:createEffect(effectType, parent, positionOrAttachment0, rotationOrNormalOrDirectionOrAttachment1, duration)
-	-- Track sounds per vehicle to prevent overlap
     if effectType:find("Sound") and parent then
         local vehicleModel = parent:FindFirstAncestorOfClass("Model")
-        if vehicleModel then
+        local chassis = vehicleModel and vehicleModel:FindFirstChild("Chassis")
+        if chassis then
             -- Initialize tracking tables if needed
             lastSoundTime[vehicleModel] = lastSoundTime[vehicleModel] or {}
             activeSounds[vehicleModel] = activeSounds[vehicleModel] or {}
@@ -171,14 +187,16 @@ function VehicleEffects:createEffect(effectType, parent, positionOrAttachment0, 
             -- Create new sound
             if effectType == "SlipSound" then
                 local props = effectProperties.SlipSound
-                local sound = Instance.new("Sound", parent)
+                local sound = Instance.new("Sound")
+                sound.Parent = chassis
                 for propName, propValue in pairs(props) do
                     sound[propName] = propValue
                 end
 
                 -- Add Reverb Effect
                 local reverbProps = effectProperties.SlipSoundReverb
-                local reverb = Instance.new("ReverbSoundEffect", sound)
+                local reverb = Instance.new("ReverbSoundEffect")
+                reverb.Parent = sound
                 for propName, propValue in pairs(reverbProps) do
                     reverb[propName] = propValue
                 end
@@ -193,9 +211,11 @@ function VehicleEffects:createEffect(effectType, parent, positionOrAttachment0, 
 
 	if effectType == "Gravel" then
 		local props = effectProperties.GravelParticles
-		local attachment = Instance.new("Attachment", parent)
+		local attachment = Instance.new("Attachment")
+		attachment.Parent = parent
 		attachment.WorldPosition = positionOrAttachment0
-		local emitter = Instance.new("ParticleEmitter", attachment)
+		local emitter = Instance.new("ParticleEmitter")
+		emitter.Parent = attachment
 		for propName, propValue in pairs(props) do
 			emitter[propName] = propValue
 		end
@@ -206,9 +226,11 @@ function VehicleEffects:createEffect(effectType, parent, positionOrAttachment0, 
 
 	elseif effectType == "BurnoutSmoke" then
 		local props = effectProperties.BurnoutSmoke
-		local attachment = Instance.new("Attachment", parent)
+		local attachment = Instance.new("Attachment")
+		attachment.Parent = parent
 		attachment.WorldPosition = positionOrAttachment0 -- Use position here
-		local emitter = Instance.new("ParticleEmitter", attachment)
+		local emitter = Instance.new("ParticleEmitter")
+		emitter.Parent = attachment
 		for propName, propValue in pairs(props) do
 			emitter[propName] = propValue
 		end
@@ -218,7 +240,8 @@ function VehicleEffects:createEffect(effectType, parent, positionOrAttachment0, 
 
 	elseif effectType == "BurnoutSound" then
 		local props = effectProperties.BurnoutSound
-		local sound = Instance.new("Sound", parent) -- Parent directly
+		local sound = Instance.new("Sound")
+		sound.Parent = parent -- Parent directly
 		for propName, propValue in pairs(props) do
 			sound[propName] = propValue
 		end
@@ -228,68 +251,53 @@ function VehicleEffects:createEffect(effectType, parent, positionOrAttachment0, 
 		-- We return the handle so StopEffect can be called.
 		return sound
 
-	elseif effectType == "CollisionSparks" then -- Added CollisionSparks
+	elseif effectType == "CollisionSparks" then
 		local props = effectProperties.CollisionSparks
-		local attachment = Instance.new("Attachment", workspace.Terrain) -- Attach to world for sparks
+		local attachment = Instance.new("Attachment")
+		attachment.Parent = workspace.Terrain -- Set parent separately
 		attachment.WorldPosition = positionOrAttachment0
-		attachment.WorldAxis = rotationOrNormalOrDirectionOrAttachment1 or Vector3.yAxis -- Use hit normal for direction
-		local emitter = Instance.new("ParticleEmitter", attachment)
+		attachment.WorldAxis = rotationOrNormalOrDirectionOrAttachment1 or Vector3.yAxis
+
+		local emitter = Instance.new("ParticleEmitter")
+		emitter.Parent = attachment -- Set parent separately
 		for propName, propValue in pairs(props) do
 			emitter[propName] = propValue
 		end
 		emitter.Enabled = true
-		emitter:Emit(math.random(5, 15)) -- Emit a burst of sparks
+		emitter:Emit(math.random(5, 15))
 		Debris:AddItem(attachment, duration or props.Lifetime.Max + 0.2)
 		return emitter
 
-	elseif effectType == "SkidParticles" then -- Added SkidParticles
+	elseif effectType == "SkidParticles" then
 		local props = effectProperties.SkidParticles
-		local attachment = Instance.new("Attachment", workspace.Terrain) -- Attach to world
+		local attachment = Instance.new("Attachment")
+		attachment.Parent = workspace.Terrain -- Set parent separately
 		attachment.WorldPosition = positionOrAttachment0
-		local emitter = Instance.new("ParticleEmitter", attachment)
+
+		local emitter = Instance.new("ParticleEmitter")
+		emitter.Parent = attachment -- Set parent separately
 		for propName, propValue in pairs(props) do
 			emitter[propName] = propValue
 		end
-		-- Set emission direction based on the skid direction (passed as rotationOrNormalOrDirection)
-		emitter.EmissionDirection = Enum.NormalId.Front -- Emit along attachment's Z axis
+		emitter.EmissionDirection = Enum.NormalId.Front
 		attachment.CFrame = CFrame.lookAt(positionOrAttachment0, positionOrAttachment0 + rotationOrNormalOrDirectionOrAttachment1)
 
 		emitter.Enabled = true
-		emitter:Emit(math.random(3, 8)) -- Emit a small burst of skid particles
+		emitter:Emit(math.random(3, 8))
 		Debris:AddItem(attachment, duration or props.Lifetime.Max + 0.2)
 		return emitter
 
-	elseif effectType == "TireMarkTrail" then -- Added Trail creation
+	elseif effectType == "TireMarkTrail" then
 		local props = effectProperties.TireMarkTrail
-		local trail = Instance.new("Trail", parent) -- Parent can be specified by controller
+		local trail = Instance.new("Trail")
+		trail.Parent = parent -- Set parent separately
 		for propName, propValue in pairs(props) do
 			trail[propName] = propValue
 		end
-		-- Attachments must be set by the calling script
-		trail.Attachment0 = positionOrAttachment0 -- Expecting Attachment0 here
-		trail.Attachment1 = rotationOrNormalOrDirectionOrAttachment1 -- Expecting Attachment1 here
-		trail.Enabled = false -- Start disabled, controller enables/disables
-		-- Debris is not ideal for trails managed by attachments; controller should handle cleanup.
+		trail.Attachment0 = positionOrAttachment0
+		trail.Attachment1 = rotationOrNormalOrDirectionOrAttachment1
+		trail.Enabled = false
 		return trail
-
-	elseif effectType == "TireMark" then -- Added TireMark structure
-		-- Creating decals purely from code is limited without a TextureId.
-		-- You'd typically need a pre-made decal asset or a specific texture.
-		local props = effectProperties.TireMarkDecal
-		if not props or not props.Texture then
-			warn("VehicleEffects: TireMark effect requires a Texture ID in effectProperties.TireMarkDecal")
-			return nil
-		end
-		local decal = Instance.new("Decal")
-		decal.Texture = props.Texture
-		decal.Size = Vector3.new(1, 0.1, 2) -- Example size
-		decal.Face = Enum.NormalId.Top -- Place on top surface
-		-- Position slightly above the ground to avoid z-fighting
-		local decalCFrame = CFrame.lookAt(positionOrAttachment0 + (rotationOrNormalOrDirectionOrAttachment1 * 0.05), positionOrAttachment0 - rotationOrNormalOrDirectionOrAttachment1) * CFrame.Angles(0, 0, 0)
-		decal.CFrame = decalCFrame
-		decal.Parent = workspace.Terrain -- Or parent to the specific hit part if not terrain
-		Debris:AddItem(decal, duration or 15)
-		return decal
 	end
 	return nil
 end
@@ -298,7 +306,7 @@ end
 local activeSlipSounds = {} -- [vehicle][wheelName] = Sound
 
 function VehicleEffects:PlaySlipSound(vehicle, wheelPart)
-    if not vehicle or not wheelPart or not wheelPart.PrimaryPart then return end
+    if not vehicle or not wheelPart then return end
     local wheelName = wheelPart.Name
     activeSlipSounds[vehicle] = activeSlipSounds[vehicle] or {}
     -- If already playing, do nothing
@@ -310,7 +318,7 @@ function VehicleEffects:PlaySlipSound(vehicle, wheelPart)
         sound[propName] = propValue
     end
     sound.Looped = true
-    sound.Parent = wheelPart.PrimaryPart
+    sound.Parent = wheelPart
     sound:Play()
     activeSlipSounds[vehicle][wheelName] = sound
 end
@@ -320,54 +328,62 @@ function VehicleEffects:StopSlipSound(vehicle, wheelPart)
     local wheelName = wheelPart.Name
     if activeSlipSounds[vehicle] and activeSlipSounds[vehicle][wheelName] then
         local sound = activeSlipSounds[vehicle][wheelName]
-        if sound.IsPlaying then sound:Stop() end
+        if sound.IsPlaying then
+            sound:Stop()
+        end
         sound:Destroy()
         activeSlipSounds[vehicle][wheelName] = nil
     end
 end
 
 -- Public methods
-function VehicleEffects:PlayGravelEffect(vehicle, wheelPart: Model)
-	local primary = wheelPart.PrimaryPart
-	if not primary then return end -- Guard against missing PrimaryPart
-	-- Determine position based on wheel contact (approximate)
-	local effectPosition = primary.Position - Vector3.new(0, primary.Size.Y / 2, 0)
-	self:createEffect("Gravel", primary, effectPosition, nil, 1) -- Pass primary part for parenting if needed
+function VehicleEffects:PlayGravelEffect(vehicle, wheelPart)
+    if not vehicle or not wheelPart then return end
+    local mainPart = getWheelPart(wheelPart)
+    if not mainPart then return end
+
+    -- Determine position based on wheel contact (approximate)
+    local effectPosition = mainPart.Position - Vector3.new(0, mainPart.Size.Y / 2, 0)
+    self:createEffect("Gravel", mainPart, effectPosition, nil, 1) -- Pass primary part for parenting if needed
 end
 
-function VehicleEffects:PlaySlipEffect(vehicle, wheelPart: Model)
-	local primary = wheelPart.PrimaryPart
-	if not primary then return end -- Guard against missing PrimaryPart
-	-- Play sound attached to vehicle root
-	--self:createEffect("SlipSound", vehicle.PrimaryPart, primary.Position) -- Position is now unused by sound creation but kept for potential future use (e.g. effects needing position)
+function VehicleEffects:PlaySlipEffect(vehicle, wheelPart)
+    if not vehicle or not wheelPart then return end
+    local mainPart = getWheelPart(wheelPart)
+    if not mainPart then return end
 
-	-- TODO: Add tire mark decal logic here if an asset ID is available
-	-- local raycastResult = workspace:Raycast(primary.Position, Vector3.new(0, -primary.Size.Y, 0))
-	-- if raycastResult then
-	-- 	 createEffect("TireMark", workspace.Terrain, raycastResult.Position, primary.Orientation.Y, 15)
-	-- end
+    -- Play sound attached to vehicle root
+    --self:createEffect("SlipSound", vehicle.PrimaryPart, primary.Position) -- Position is now unused by sound creation but kept for potential future use (e.g. effects needing position)
+
+    -- TODO: Add tire mark decal logic here if an asset ID is available
+    -- local raycastResult = workspace:Raycast(primary.Position, Vector3.new(0, -primary.Size.Y, 0))
+    -- if raycastResult then
+    -- 	 createEffect("TireMark", workspace.Terrain, raycastResult.Position, primary.Orientation.Y, 15)
+    -- end
 end
 
-function VehicleEffects:PlayBurnoutEffect(vehicle, wheelPart: Model)
-	local primary = wheelPart.PrimaryPart
-	if not primary then return end -- Guard against missing PrimaryPart
-	-- Determine position near the wheel
-	local effectPosition = primary.Position - Vector3.new(0, primary.Size.Y / 2 - 0.5, 0)
-	-- Create continuous smoke attached to the wheel's primary part
-	local smokeEmitter = self:createEffect("BurnoutSmoke", primary, effectPosition, nil, 5)
-	-- Play burnout sound attached to vehicle root
-	local burnoutSound = self:createEffect("BurnoutSound", vehicle.PrimaryPart, primary.Position)
+function VehicleEffects:PlayBurnoutEffect(vehicle, wheelPart)
+    if not vehicle or not wheelPart then return end
+    local mainPart = getWheelPart(wheelPart)
+    if not mainPart then return end
 
-	-- TODO: Add continuous tire marks if desired and asset ID is available
-	-- local tireMark = createEffect("TireMark", workspace.Terrain, effectPosition, Vector3.new(0, 1, 0), 30)
+    -- Position effects at ground contact point
+    local effectPosition = mainPart.Position - Vector3.new(0, mainPart.Size.Y / 2, 0)
+    -- Create continuous smoke attached to the wheel's primary part
+    local smokeEmitter = self:createEffect("BurnoutSmoke", mainPart, effectPosition, nil, 5)
+    -- Play burnout sound attached to vehicle root
+    local burnoutSound = self:createEffect("BurnoutSound", vehicle:FindFirstChild("Chassis"), effectPosition)
 
-	-- Return handles to stop continuous effects
-	return { smoke = smokeEmitter, sound = burnoutSound --[[, tireMark = tireMark]] }
+    return {smoke = smokeEmitter, sound = burnoutSound}
 end
 
 -- Added PlayCollisionEffect
 function VehicleEffects:PlayCollisionEffect(vehicle, contactPoint, contactNormal, impactMagnitude)
-	-- Play sparks at the contact point, oriented by the contact normal
+    if not vehicle then return end
+    local chassis = vehicle:FindFirstChild("Chassis")
+    if not chassis then return end
+
+    -- Play sparks at the contact point, oriented by the contact normal
 	local sparkCount = math.clamp(math.floor(impactMagnitude / 5), 1, 10) -- More sparks for harder impacts
 	local sparkEmitter = self:createEffect("CollisionSparks", workspace.Terrain, contactPoint, contactNormal, 0.5)
 	if sparkEmitter then
@@ -379,17 +395,18 @@ function VehicleEffects:PlayCollisionEffect(vehicle, contactPoint, contactNormal
 end
 
 -- Updated PlaySkidEffect to prepare for Trail (will be fully implemented in controller)
-function VehicleEffects:PlaySkidEffect(vehicle, wheelPart: Model, skidDirection)
-	local primary = wheelPart.PrimaryPart
-	if not primary then return end
-	local effectPosition = primary.Position - Vector3.new(0, primary.Size.Y / 2 - 0.1, 0)
-	-- Play skid sound
-	--self:createEffect("SlipSound", vehicle.PrimaryPart, effectPosition)
-	-- Create skid particles
-	self:createEffect("SkidParticles", workspace.Terrain, effectPosition, skidDirection, 0.6)
+function VehicleEffects:PlaySkidEffect(vehicle, wheelPart, skidDirection)
+    if not vehicle or not wheelPart then return end
+    local mainPart = getWheelPart(wheelPart)
+    if not mainPart then return end
 
-	-- Tire Mark Trail creation/management will happen in the controller script
-	-- It needs to create/update attachments based on wheel position.
+    -- Position effects at ground contact point
+    local effectPosition = mainPart.Position - Vector3.new(0, mainPart.Size.Y / 2, 0)
+    -- Create skid particles at ground level
+    self:createEffect("SkidParticles", workspace.Terrain, effectPosition, skidDirection, 0.6)
+
+    -- Tire Mark Trail creation/management will happen in the controller script
+    -- It needs to create/update attachments based on wheel position.
 end
 
 function VehicleEffects:StopEffect(effectInstance)
@@ -402,16 +419,23 @@ function VehicleEffects:StopEffect(effectInstance)
 		effectInstance:Stop()
 		-- Sound will be cleaned up by Debris
 	elseif effectInstance:IsA("Decal") then
-		-- Decals don't have an explicit stop, rely on Debris
+		-- Decals rely on Debris for cleanup, no explicit stop needed
+		return
 	end
 end
 
 -- Added StopBurnoutEffect to handle multiple parts
 function VehicleEffects:StopBurnoutEffect(effectHandles)
 	if not effectHandles then return end
-	if effectHandles.smoke then self:StopEffect(effectHandles.smoke) end
-	if effectHandles.sound then self:StopEffect(effectHandles.sound) end
-	if effectHandles.tireMark then self:StopEffect(effectHandles.tireMark) end
+	if effectHandles.smoke then
+        self:StopEffect(effectHandles.smoke)
+    end
+	if effectHandles.sound then
+        self:StopEffect(effectHandles.sound)
+    end
+	if effectHandles.tireMark then
+        self:StopEffect(effectHandles.tireMark)
+    end
 end
 
 -- TODO: Add methods for collision effects (sparks, debris)
@@ -419,19 +443,23 @@ end
 local activeSkidSounds = {} -- [vehicle][wheelName] = Sound
 
 function VehicleEffects:GetOrCreateSkidSound(vehicle, wheelPart)
-    if not vehicle or not wheelPart or not wheelPart.PrimaryPart then return nil end
+    if not vehicle or not wheelPart then return nil end
+    local mainPart = getWheelPart(wheelPart)
+    if not mainPart then return nil end
+
     local wheelName = wheelPart.Name
     activeSkidSounds[vehicle] = activeSkidSounds[vehicle] or {}
     if activeSkidSounds[vehicle][wheelName] then
         return activeSkidSounds[vehicle][wheelName]
     end
+
     local props = effectProperties.SlipSound
     local sound = Instance.new("Sound")
     for propName, propValue in pairs(props) do
         sound[propName] = propValue
     end
     sound.Looped = true
-    sound.Parent = wheelPart.PrimaryPart
+    sound.Parent = mainPart
     activeSkidSounds[vehicle][wheelName] = sound
     return sound
 end
